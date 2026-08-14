@@ -1,0 +1,106 @@
+# Optional - only for users with Docker. The project runs without Docker
+# via run.py (see README "Quick Start": python setup.py && python run.py).
+# This file is provided for anyone who prefers a containerized deployment;
+# it is not required and is not part of the default local workflow. Vector
+# storage runs in embedded (serverless) Qdrant mode either way — no separate
+# Qdrant server/container is needed even here — so this only containerizes
+# Ollama, the API, and the frontend.
+services:
+  # Local LLM server (free, no API key). Runs on CPU by default. To use a
+  # GPU instead, install the NVIDIA Container Toolkit on the host and
+  # uncomment the "deploy" block below — Ollama will then automatically
+  # offload inference to the GPU with no other changes required.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cfd-copilot-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/11434' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # One-shot init container: pulls the default model into the shared
+  # ollama_data volume, then exits. `ollama pull` is idempotent, so this is
+  # a no-op (and fast) on every restart after the first.
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: cfd-copilot-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["/bin/sh", "-c", "ollama pull llama3.1:8b"]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: cfd-copilot-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      QDRANT_LOCAL_PATH: /app/qdrant_storage
+    volumes:
+      - shared_data:/app/data
+      - qdrant_storage:/app/qdrant_storage
+      - hf_cache:/root/.cache
+      - logs_data:/app/logs
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    container_name: cfd-copilot-streamlit
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      API_BASE_URL: http://api:8000
+    volumes:
+      - shared_data:/app/data
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  shared_data:
+  qdrant_storage:
+  hf_cache:
+  logs_data:

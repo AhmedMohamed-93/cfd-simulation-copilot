@@ -1,0 +1,162 @@
+[
+  {
+    "id": "tc01",
+    "description": "Laminar flow in a straight pipe of diameter 0.02 m carrying water at a Reynolds number of 500.",
+    "expected_solver": "simpleFoam",
+    "expected_turbulence_model": "laminar",
+    "expected_key_parameters": {"reynolds_number": 500, "fluid": "water", "is_steady": true},
+    "evaluation_criteria": "Agent must select laminar model since Re < 2300 and a steady incompressible solver."
+  },
+  {
+    "id": "tc02",
+    "description": "Fully developed turbulent flow of air in a circular pipe at Reynolds number 50000, steady state, interested in pressure drop.",
+    "expected_solver": "simpleFoam",
+    "expected_turbulence_model": "kOmegaSST",
+    "expected_key_parameters": {"reynolds_number": 50000, "fluid": "air", "is_steady": true},
+    "evaluation_criteria": "Agent must select a RANS turbulence model appropriate for Re >= 5e4 and a steady incompressible solver."
+  },
+  {
+    "id": "tc03",
+    "description": "Unsteady flow past a circular cylinder at Reynolds number 1000 in air, interested in vortex shedding frequency.",
+    "expected_solver": "pimpleFoam",
+    "expected_turbulence_model": "kOmegaSST",
+    "expected_key_parameters": {"reynolds_number": 1000, "fluid": "air", "is_steady": false},
+    "evaluation_criteria": "Agent must recognize unsteady vortex shedding requires a transient solver."
+  },
+  {
+    "id": "tc04",
+    "description": "Lid-driven cavity flow of water at Reynolds number 1000, two-dimensional, laminar.",
+    "expected_solver": "icoFoam",
+    "expected_turbulence_model": "laminar",
+    "expected_key_parameters": {"reynolds_number": 1000, "fluid": "water", "is_steady": false},
+    "evaluation_criteria": "Agent must select laminar model; icoFoam or pimpleFoam both acceptable for this classic benchmark."
+  },
+  {
+    "id": "tc05",
+    "description": "External aerodynamics of a NACA0012 airfoil at low speed, Reynolds number 3e6, small angle of attack, steady-state analysis of lift and drag.",
+    "expected_solver": "simpleFoam",
+    "expected_turbulence_model": "SpalartAllmaras",
+    "expected_key_parameters": {"reynolds_number": 3000000, "fluid": "air", "is_steady": true},
+    "evaluation_criteria": "Agent must select a turbulence model suited to attached/mildly separated aerodynamic flow (SpalartAllmaras or kOmegaSST)."
+  },
+  {
+    "id": "tc06",
+    "description": "Compressible flow over a wedge at Mach 2, supersonic inviscid-dominated regime with oblique shock formation.",
+    "expected_solver": "rhoPimpleFoam",
+    "expected_turbulence_model": "kOmegaSST",
+    "expected_key_parameters": {"mach_number": 2.0, "is_compressible": true, "is_steady": false},
+    "evaluation_criteria": "Agent must recognize compressibility and select a density-based-capable transient compressible solver."
+  },
+  {
+    "id": "tc07",
+    "description": "Natural convection of air in a differentially heated square cavity, Rayleigh number 1e6, steady-state temperature field of interest.",
+    "expected_solver": "buoyantSimpleFoam",
+    "expected_turbulence_model": "laminar",
+    "expected_key_parameters": {"fluid": "air", "temperature_dependent": true, "is_steady": true},
+    "evaluation_criteria": "Agent must recognize buoyancy-driven flow and select a buoyant solver family."
+  },
+  {
+    "id": "tc08",
+    "description": "Turbulent channel flow at friction Reynolds number Re_tau=180, fully resolved turbulence statistics desired for research purposes.",
+    "expected_solver": "pimpleFoam",
+    "expected_turbulence_model": "Smagorinsky",
+    "expected_key_parameters": {"fluid": "air", "is_steady": false},
+    "evaluation_criteria": "Agent should suggest LES or DNS given the explicit request for resolved turbulence statistics rather than RANS."
+  },
+  {
+    "id": "tc09",
+    "description": "Turbulent mixing of two air streams at different temperatures merging in a T-junction, Reynolds number 20000, unsteady mixing behavior of interest.",
+    "expected_solver": "pimpleFoam",
+    "expected_turbulence_model": "kEpsilon",
+    "expected_key_parameters": {"reynolds_number": 20000, "fluid": "air", "is_steady": false},
+    "evaluation_criteria": "Agent must select a transient incompressible solver with a turbulence model suited to free shear mixing."
+  },
+  {
+    "id": "tc10",
+    "description": "Steady wind flow over a rectangular building for pedestrian-level wind comfort assessment, Reynolds number 1e6.",
+    "expected_solver": "simpleFoam",
+    "expected_turbulence_model": "kOmegaSST",
+    "expected_key_parameters": {"reynolds_number": 1000000, "fluid": "air", "is_steady": true},
+    "evaluation_criteria": "Agent must select a robust RANS model for bluff-body separated flow around a building."
+  },
+  {
+    "id": "tc11",
+    "description": "Laminar flow through a 90-degree pipe bend, Reynolds number 800, water, steady-state pressure loss estimation.",
+    "expected_solver": "simpleFoam",
+    "expected_turbulence_model": "laminar",
+    "expected_key_parameters": {"reynolds_number": 800, "fluid": "water", "is_steady": true},
+    "evaluation_criteria": "Agent must select laminar model since Re < 2300."
+  },
+  {
+    "id": "tc12",
+    "description": "Turbulent flow over a backward-facing step, Reynolds number 40000, steady-state reattachment length of interest.",
+    "expected_solver": "simpleFoam",
+    "expected_turbulence_model": "kOmegaSST",
+    "expected_key_parameters": {"reynolds_number": 40000, "fluid": "air", "is_steady": true},
+    "evaluation_criteria": "Agent must select kOmegaSST given separation and reattachment are the quantities of interest."
+  },
+  {
+    "id": "tc13",
+    "description": "Unsteady turbulent flow through a centrifugal pump impeller passage, water, Reynolds number 2e5.",
+    "expected_solver": "pimpleFoam",
+    "expected_turbulence_model": "kOmegaSST",
+    "expected_key_parameters": {"reynolds_number": 200000, "fluid": "water", "is_steady": false},
+    "evaluation_criteria": "Agent must select a transient incompressible solver given rotating machinery unsteadiness."
+  },
+  {
+    "id": "tc14",
+    "description": "Steady laminar flow between two parallel plates (Poiseuille flow), Reynolds number 100, oil as the working fluid.",
+    "expected_solver": "simpleFoam",
+    "expected_turbulence_model": "laminar",
+    "expected_key_parameters": {"reynolds_number": 100, "fluid": "oil", "is_steady": true},
+    "evaluation_criteria": "Agent must select laminar model since Re << 2300."
+  },
+  {
+    "id": "tc15",
+    "description": "Transonic flow over a supercritical airfoil at Mach 0.78, Reynolds number 5e6, steady-state shock/boundary-layer interaction.",
+    "expected_solver": "rhoSimpleFoam",
+    "expected_turbulence_model": "kOmegaSST",
+    "expected_key_parameters": {"mach_number": 0.78, "is_compressible": true, "is_steady": true},
+    "evaluation_criteria": "Agent must recognize compressibility even though flow is nominally steady and select a compressible solver."
+  },
+  {
+    "id": "tc16",
+    "description": "Supersonic nozzle flow at Mach 3 exit condition, unsteady startup transient of interest, air as the working fluid.",
+    "expected_solver": "rhoPimpleFoam",
+    "expected_turbulence_model": "kOmegaSST",
+    "expected_key_parameters": {"mach_number": 3.0, "is_compressible": true, "is_steady": false},
+    "evaluation_criteria": "Agent must select a transient compressible solver given the explicit startup transient interest."
+  },
+  {
+    "id": "tc17",
+    "description": "Dam-break free-surface flow of water into air-filled channel, unsteady, interested in wave front propagation.",
+    "expected_solver": "interFoam",
+    "expected_turbulence_model": "kEpsilon",
+    "expected_key_parameters": {"multiphase": true, "is_steady": false},
+    "evaluation_criteria": "Agent must recognize two immiscible phases and select interFoam."
+  },
+  {
+    "id": "tc18",
+    "description": "Sloshing of fuel (water surrogate) inside a partially filled tank under periodic excitation, unsteady free surface.",
+    "expected_solver": "interFoam",
+    "expected_turbulence_model": "laminar",
+    "expected_key_parameters": {"multiphase": true, "is_steady": false},
+    "evaluation_criteria": "Agent must select interFoam for the VOF free-surface problem."
+  },
+  {
+    "id": "tc19",
+    "description": "Unsteady natural convection plume above a heated horizontal plate in air, transient thermal development of interest.",
+    "expected_solver": "buoyantPimpleFoam",
+    "expected_turbulence_model": "laminar",
+    "expected_key_parameters": {"fluid": "air", "temperature_dependent": true, "is_steady": false},
+    "evaluation_criteria": "Agent must select the transient buoyant solver given the explicit transient plume development interest."
+  },
+  {
+    "id": "tc20",
+    "description": "Turbulent external flow over a wind turbine blade section at Reynolds number 1e6, steady-state aerodynamic loads of interest.",
+    "expected_solver": "simpleFoam",
+    "expected_turbulence_model": "kOmegaSST",
+    "expected_key_parameters": {"reynolds_number": 1000000, "fluid": "air", "is_steady": true},
+    "evaluation_criteria": "Agent must select kOmegaSST for accurate aerodynamic load prediction with a steady incompressible solver."
+  }
+]

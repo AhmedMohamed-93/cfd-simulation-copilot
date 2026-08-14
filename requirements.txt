@@ -1,0 +1,52 @@
+# --- Core: agent orchestration + RAG plumbing ---
+langchain==0.3.7
+langchain-core==0.3.21
+langchain-text-splitters==0.3.2
+langgraph==0.2.53
+
+# --- Free LLM provider (default): Hugging Face Inference API ---
+# Needs a free account + token (huggingface.co/settings/tokens); no local
+# RAM/GPU required, unlike the Ollama alternative below.
+huggingface_hub>=0.23.0
+langchain-huggingface==0.1.2
+
+# --- Local embedding + reranking (used regardless of LLM_PROVIDER) ---
+sentence-transformers==3.3.1
+
+# --- Vector database + API/frontend ---
+qdrant-client==1.12.1
+pydantic==2.9.2
+pydantic-settings==2.6.1
+fastapi==0.115.5
+uvicorn[standard]==0.32.0
+streamlit==1.40.1
+
+# --- Evaluation (RAGAS judge mirrors whichever LLM_PROVIDER is configured) ---
+ragas==0.2.6
+datasets==3.1.0
+
+# --- Optional: local Ollama provider (LLM_PROVIDER=ollama) ---
+# Free and fully local, but requires enough RAM to load the model. Not
+# needed for the default Hugging Face setup — imported lazily.
+ollama==0.4.4
+langchain-ollama==0.2.1
+
+# --- Optional: production Mistral API provider (LLM_PROVIDER=mistral) ---
+# Only required if you set LLM_PROVIDER=mistral in .env. Not needed for the
+# default free setup — imported lazily so the app runs fine without these
+# installed.
+mistralai==1.2.3
+langchain-mistralai==0.2.3
+
+# --- Utilities ---
+tiktoken==0.8.0
+requests==2.32.3
+beautifulsoup4==4.12.3
+python-dotenv==1.0.1
+pandas==2.2.3
+
+# --- Dev/test ---
+pytest==8.3.3
+pytest-cov==6.0.0
+ruff==0.7.4
+httpx==0.27.2
