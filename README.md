@@ -1,7 +1,7 @@
 # CFD Simulation Copilot
 ### LLM Agent for OpenFOAM Simulation Setup | Free via Hugging Face — No Docker, No Local GPU/RAM — Production-Ready on Mistral API
 
-[![CI](https://github.com/ahmed-mohamed11/cfd-simulation-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmed-mohamed11/cfd-simulation-copilot/actions/workflows/ci.yml)
+[![CI](https://github.com/AhmedMohamed-93/cfd-simulation-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/AhmedMohamed-93/cfd-simulation-copilot/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11-blue)
 ![Hugging Face](https://img.shields.io/badge/LLM-Hugging%20Face%20Inference%20API-yellow)
 ![Mistral](https://img.shields.io/badge/production-Mistral%20API-orange)
@@ -18,7 +18,7 @@ CFD Simulation Copilot is a production-grade AI agent that integrates LLMs with 
 
 🔗 Live demo coming soon — deploying to Hugging Face Spaces
 
-**Source:** [github.com/ahmed-mohamed11/cfd-simulation-copilot](https://github.com/ahmed-mohamed11/cfd-simulation-copilot)
+**Source:** [github.com/AhmedMohamed-93/cfd-simulation-copilot](https://github.com/AhmedMohamed-93/cfd-simulation-copilot)
 
 ---
 
@@ -312,4 +312,4 @@ Embeddings and reranking remain local (`sentence-transformers`) regardless of `L
 
 **Ahmed Mohamed** — Aerospace Engineer & PhD in Fluid Mechanics (École Centrale de Lyon). 4 years of DNS research on CNRS national HPC clusters. Expertise in OpenFOAM, ANSYS, turbulence modeling, and scientific computing. Now working at the intersection of CFD and AI.
 
-[GitHub](https://github.com/ahmed-mohamed11) | [LinkedIn](https://linkedin.com/in/your-profile)
+[GitHub](https://github.com/AhmedMohamed-93) | [LinkedIn](https://linkedin.com/in/ahmed-mohamed11)
