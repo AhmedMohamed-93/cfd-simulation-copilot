@@ -1,7 +1,7 @@
 # CFD Simulation Copilot
 ### LLM Agent for OpenFOAM Simulation Setup | Free via Hugging Face — No Docker, No Local GPU/RAM — Production-Ready on Mistral API
 
-[![CI](https://github.com/your-username/cfd-simulation-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/your-username/cfd-simulation-copilot/actions/workflows/ci.yml)
+[![CI](https://github.com/ahmed-mohamed11/cfd-simulation-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmed-mohamed11/cfd-simulation-copilot/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11-blue)
 ![Hugging Face](https://img.shields.io/badge/LLM-Hugging%20Face%20Inference%20API-yellow)
 ![Mistral](https://img.shields.io/badge/production-Mistral%20API-orange)
@@ -16,7 +16,9 @@ CFD Simulation Copilot is a production-grade AI agent that integrates LLMs with 
 
 > **Designed to be LLM-agnostic.** Every LLM call goes through a single provider-pluggable client ([`src/common/llm_client.py`](src/common/llm_client.py)) supporting three backends: Hugging Face (default, free, no local RAM), a fully local Ollama server (free but RAM-hungry — see [Production deployment](#production-deployment)), and the **Mistral API** (`mistral-large-latest`) for production. Switching is one setting; the agent graph, tools, and prompts are unchanged. This project doubles as a direct demonstration of building a production agentic + RAG system on Mistral's own models, without requiring a paid key just to try it out.
 
-**Live demo:** [huggingface.co/spaces/your-username/cfd-simulation-copilot](https://huggingface.co/spaces/your-username/cfd-simulation-copilot) *(placeholder — deploy and update this link)*
+🔗 Live demo coming soon — deploying to Hugging Face Spaces
+
+**Source:** [github.com/ahmed-mohamed11/cfd-simulation-copilot](https://github.com/ahmed-mohamed11/cfd-simulation-copilot)
 
 ---
 
@@ -310,4 +312,4 @@ Embeddings and reranking remain local (`sentence-transformers`) regardless of `L
 
 **Ahmed Mohamed** — Aerospace Engineer & PhD in Fluid Mechanics (École Centrale de Lyon). 4 years of DNS research on CNRS national HPC clusters. Expertise in OpenFOAM, ANSYS, turbulence modeling, and scientific computing. Now working at the intersection of CFD and AI.
 
-[GitHub](https://github.com/your-username) | [LinkedIn](https://linkedin.com/in/your-profile)
+[GitHub](https://github.com/ahmed-mohamed11) | [LinkedIn](https://linkedin.com/in/your-profile)
