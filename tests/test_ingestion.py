@@ -33,7 +33,7 @@ def test_load_openfoam_tutorials_extracts_only_real_named_cases():
     Regression test for the git-trees-based rewrite: the tree includes
     entries at every depth (tutorials/, tutorials/incompressible/,
     tutorials/incompressible/simpleFoam/, tutorials/incompressible/simpleFoam/pitzDaily/,
-    files, etc.) — only the last of those (an actual named tutorial case)
+    files, etc.); only the last of those (an actual named tutorial case)
     should become a document.
     """
     fake_response = MagicMock()

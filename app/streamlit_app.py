@@ -1,10 +1,10 @@
 """Streamlit frontend for the CFD Simulation Copilot.
 
 Three pages:
-    1. CFD Copilot — submit a problem description, view the agent's solver
+    1. CFD Copilot: submit a problem description, view the agent's solver
        recommendation, generated OpenFOAM files, and physics validation.
-    2. Knowledge Base — inspect indexed sources and query retrieval directly.
-    3. Agent Traces — browse past simulation sessions and evaluation results.
+    2. Knowledge Base: inspect indexed sources and query retrieval directly.
+    3. Agent Traces: browse past simulation sessions and evaluation results.
 
 The app talks to the FastAPI backend over HTTP and never imports agent
 internals directly, so it degrades gracefully (shows an error banner
@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,21 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from config import settings
+
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
+
+# How often to poll GET /sessions/{id}/status while a simulation is running.
+_STATUS_POLL_INTERVAL_S = 2
+
+_NODE_LABELS = {
+    "parse_flow_description": "Parsing flow description",
+    "retrieve_cfd_knowledge": "Retrieving CFD knowledge",
+    "select_solver_and_models": "Selecting solver & turbulence model",
+    "generate_openfoam_files": "Generating OpenFOAM case files",
+    "validate_physics": "Validating physics",
+    "format_final_response": "Formatting final response",
+}
 
 EXAMPLE_QUERIES = [
     "Turbulent flow in a pipe at Re=50000",
@@ -68,17 +83,6 @@ _CUSTOM_CSS = """
         margin-bottom: 0.4rem;
         font-size: 0.92rem;
         line-height: 1.4;
-    }
-
-    .cfd-step {
-        padding: 0.45rem 0.8rem;
-        border-radius: 6px;
-        border-left: 3px solid #FF6B4A;
-        background-color: #161B22;
-        margin-bottom: 0.35rem;
-        font-family: "Source Code Pro", monospace;
-        font-size: 0.85rem;
-        color: #E6EDF3;
     }
 
     .cfd-badge-row { margin-bottom: 1.2rem; }
@@ -133,7 +137,9 @@ def _api_post(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         The parsed JSON response, or None if the request failed.
     """
     try:
-        response = requests.post(f"{API_BASE_URL}{path}", json=payload, timeout=120)
+        response = requests.post(
+            f"{API_BASE_URL}{path}", json=payload, timeout=settings.STREAMLIT_REQUEST_TIMEOUT
+        )
         response.raise_for_status()
         return response.json()
     except requests.RequestException as exc:
@@ -176,10 +182,60 @@ def _build_case_zip(generated_files: dict[str, str]) -> bytes:
     return buffer.read()
 
 
+def _poll_simulation(session_id: str) -> dict[str, Any] | None:
+    """Poll GET /sessions/{session_id}/status until the run finishes.
+
+    Updates a live st.status() container as each agent node completes,
+    instead of leaving the user staring at a frozen spinner for the ~1-2
+    minutes a local CPU-bound Ollama run can take.
+
+    Args:
+        session_id: The session id returned by POST /simulate.
+
+    Returns:
+        The full result dict (matching the old synchronous /simulate
+        response shape) once the run completes, or None if it errored or
+        the API became unreachable mid-run.
+    """
+    seen_steps: set[str] = set()
+
+    with st.status("Running CFD Copilot agent...", expanded=True) as status_box:
+        while True:
+            progress = _api_get(f"/sessions/{session_id}/status")
+            if progress is None:
+                status_box.update(label="Lost connection to the API.", state="error")
+                return None
+
+            for step in progress.get("completed_steps", []):
+                if step not in seen_steps:
+                    seen_steps.add(step)
+                    st.write(f"✅ {step}")
+
+            status = progress.get("status")
+            if status == "complete":
+                status_box.update(label="Agent run complete.", state="complete", expanded=False)
+                break
+            if status == "error":
+                error_message = progress.get("error") or "Unknown error"
+                status_box.update(label=f"Agent run failed: {error_message}", state="error")
+                st.error(error_message)
+                return None
+
+            current_node = progress.get("current_node")
+            node_label = _NODE_LABELS.get(current_node, current_node or "Starting...")
+            status_box.update(label=f"Running: {node_label}")
+            time.sleep(_STATUS_POLL_INTERVAL_S)
+
+    session = _api_get(f"/sessions/{session_id}")
+    if session is None:
+        return None
+    return session.get("response")
+
+
 def page_copilot() -> None:
     """Render the main CFD Copilot page: submit a query, view results."""
     st.title("🌀 CFD Simulation Copilot")
-    st.caption("LLM agent for OpenFOAM simulation setup — runs free via the Hugging Face Inference API")
+    st.caption("LLM agent for OpenFOAM simulation setup, runs free via the Hugging Face Inference API")
     _render_status_badges()
 
     example = st.selectbox("Example queries", options=["(custom)"] + EXAMPLE_QUERIES)
@@ -192,17 +248,15 @@ def page_copilot() -> None:
     )
 
     if st.button("Run CFD Copilot", type="primary", disabled=not query.strip()):
-        steps = ["Parse flow description", "Retrieve CFD knowledge", "Select solver & models",
-                  "Generate OpenFOAM files", "Validate physics"]
-        step_placeholder = st.empty()
-        with step_placeholder.container():
-            for step in steps:
-                st.markdown(f"<div class='cfd-step'>⏳ {step}...</div>", unsafe_allow_html=True)
+        started = _api_post("/simulate", {"query": query})
+        if started is None:
+            return
+        session_id = started.get("session_id")
+        if not session_id:
+            st.error("API did not return a session_id.")
+            return
 
-        with st.spinner("Running agent..."):
-            result = _api_post("/simulate", {"query": query, "stream": False})
-        step_placeholder.empty()
-
+        result = _poll_simulation(session_id)
         if result is None:
             return
 
@@ -267,20 +321,20 @@ def page_copilot() -> None:
                 # when the whole batch is a poor match); display as a
                 # 0-100% relevance figure. match_quality is the absolute
                 # floor on top of that, derived from the raw
-                # (pre-normalization) cross-encoder logit — it's what lets
+                # (pre-normalization) cross-encoder logit; it's what lets
                 # a citation read "100% relevance (weak match)" instead of
                 # implying strong relevance just for ranking first.
-                # title alone (not source: title) — every ingested title
+                # title alone (not source: title): every ingested title
                 # already embeds its human-readable category, e.g.
                 # "OpenFOAM User Guide: Meshing Guidelines"; `source` is a
                 # separate internal slug, not a display name.
-                score_str = f" — relevance {score * 10:.0f}%" if score is not None else ""
+                score_str = f", relevance {score * 10:.0f}%" if score is not None else ""
                 quality = c.get("match_quality")
                 quality_str = f" ({quality} match)" if quality else ""
                 st.markdown(f"- **{c.get('title', 'untitled')}**{score_str}{quality_str}")
             if all(c.get("match_quality") == "weak" for c in citations):
                 st.warning(
-                    "Retrieval confidence was low for this query — the recommendation "
+                    "Retrieval confidence was low for this query. The recommendation "
                     "relies primarily on the physics decision rules rather than "
                     "retrieved documentation."
                 )
@@ -306,7 +360,7 @@ def page_knowledge_base() -> None:
                 df = pd.DataFrame({"topic": list(topics.keys()), "count": list(topics.values())})
                 st.bar_chart(df.set_index("topic"))
             else:
-                st.info("No topic breakdown available yet — run the ingestion pipeline.")
+                st.info("No topic breakdown available yet. Run the ingestion pipeline.")
 
     health = _api_get("/health")
     if health:

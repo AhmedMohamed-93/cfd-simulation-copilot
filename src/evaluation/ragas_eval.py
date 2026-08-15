@@ -4,7 +4,7 @@ Runs every scenario in evaluation/test_cases.json through the full agent
 graph, then scores the results two ways:
 
 1. RAGAS metrics (faithfulness, answer_relevancy, context_precision), judged
-   by a local Ollama model (llama3.2:latest) via ``langchain_ollama`` — this
+   by a local Ollama model (llama3.2:latest) via ``langchain_ollama``. This
    script always forces LLM_PROVIDER=ollama for both the agent and the judge
    (see the top of this module), regardless of the deployed app's own
    LLM_PROVIDER setting, since evaluation runs repeatedly and locally and
@@ -284,7 +284,7 @@ def _print_summary_table(aggregate: dict[str, Any], case_results: list[dict[str,
         aggregate: Aggregate metric scores.
         case_results: Per-case result dicts.
     """
-    print("\n=== CFD Simulation Copilot — Evaluation Summary ===\n")
+    print("\n=== CFD Simulation Copilot: Evaluation Summary ===\n")
     print(f"{'Metric':<32}{'Score':>10}")
     print("-" * 42)
     for name, value in aggregate.items():

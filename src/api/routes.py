@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from collections import Counter
@@ -11,10 +12,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from config import settings
 from src.agent.graph import run_agent
+from src.agent.state import AgentState
 from src.api.schemas import (
     FeedbackRequest,
     FeedbackResponse,
@@ -23,6 +25,8 @@ from src.api.schemas import (
     SessionRecord,
     SimulateRequest,
     SimulateResponse,
+    SimulateStartedResponse,
+    SimulationStatusResponse,
 )
 from src.retrieval.vector_store import QdrantVectorStore
 
@@ -30,6 +34,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _SESSIONS_PATH = Path(settings.SESSIONS_DB_PATH)
+
+# In-memory live-progress store for in-flight /simulate background runs,
+# keyed by session_id. Single-process only (this app runs one uvicorn
+# worker, see run.py), so a plain dict + lock is sufficient; no need for
+# Redis or similar. Distinct from the on-disk sessions store (_SESSIONS_PATH),
+# which only gains an entry once a run finishes.
+_session_progress_lock = threading.Lock()
+_session_progress: dict[str, dict[str, Any]] = {}
 
 
 def _load_sessions() -> dict[str, dict[str, Any]]:
@@ -58,46 +70,126 @@ def _save_sessions(sessions: dict[str, dict[str, Any]]) -> None:
     _SESSIONS_PATH.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
 
 
-@router.post("/simulate", response_model=SimulateResponse)
-def simulate(request: SimulateRequest) -> SimulateResponse:
-    """Run the CFD copilot agent on a natural-language problem description.
+def _run_agent_background(session_id: str, query: str) -> None:
+    """Run the agent for one session, updating its live progress as it goes.
+
+    Runs in a FastAPI BackgroundTask (Starlette dispatches a sync callable
+    like this one to a thread pool, so it never blocks the event loop;
+    important here since run_agent is a long blocking call on local
+    CPU-bound Ollama). On completion (success or failure), persists the
+    result to the on-disk sessions store exactly as the old synchronous
+    handler did, then marks the in-memory progress entry "complete"/"error".
+
+    Args:
+        session_id: The session identifier already returned to the client.
+        query: The user's natural-language CFD problem description.
+    """
+
+    def _on_step(node_name: str, state: AgentState) -> None:
+        with _session_progress_lock:
+            _session_progress[session_id]["current_node"] = node_name
+            _session_progress[session_id]["completed_steps"] = list(state.get("reasoning_steps", []))
+
+    # A broad except here is deliberate: run_agent already catches and
+    # records graph-execution errors in final_state["error"], but anything
+    # raised outside that (e.g. building the response, disk I/O saving the
+    # session) must still mark this session "error", otherwise the client
+    # polls "running" forever with no way to know the run has died.
+    try:
+        start = time.perf_counter()
+        final_state = run_agent(query, on_step=_on_step)
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        solver_config = final_state.get("solver_config") or {}
+        response = SimulateResponse(
+            session_id=session_id,
+            solver=solver_config.get("solver_name"),
+            turbulence_model=solver_config.get("turbulence_model"),
+            generated_files=final_state.get("generated_files", {}),
+            validation=final_state.get("validation_results", {}),
+            explanation=final_state.get("final_response", ""),
+            citations=final_state.get("citations", []),
+            latency_ms=latency_ms,
+            error=final_state.get("error"),
+        )
+
+        sessions = _load_sessions()
+        sessions[session_id] = {
+            "session_id": session_id,
+            "query": query,
+            "response": response.model_dump(mode="json"),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _save_sessions(sessions)
+
+        with _session_progress_lock:
+            _session_progress[session_id]["status"] = "error" if final_state.get("error") else "complete"
+            _session_progress[session_id]["error"] = final_state.get("error")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Background agent run crashed for session %s.", session_id)
+        with _session_progress_lock:
+            _session_progress[session_id]["status"] = "error"
+            _session_progress[session_id]["error"] = str(exc)
+
+
+@router.post("/simulate", response_model=SimulateStartedResponse)
+def simulate(request: SimulateRequest, background_tasks: BackgroundTasks) -> SimulateStartedResponse:
+    """Start a CFD copilot agent run in the background and return immediately.
+
+    A local Ollama run makes 2 sequential LLM calls (tens of seconds each
+    on CPU), so this returns right away with a session_id rather than
+    blocking the HTTP request for the whole run. Poll
+    GET /sessions/{session_id}/status for live progress, then fetch
+    GET /sessions/{session_id} for the full result once its status is
+    "complete".
 
     Args:
         request: The simulation request containing the user's query.
+        background_tasks: Injected by FastAPI; used to schedule the actual
+            agent run after this response is sent.
 
     Returns:
-        The full agent output: solver/turbulence selection, generated
-        OpenFOAM files, physics validation, explanation, and citations.
+        The new session_id and status="running".
     """
-    start = time.perf_counter()
     session_id = str(uuid.uuid4())
+    with _session_progress_lock:
+        _session_progress[session_id] = {
+            "status": "running",
+            "current_node": None,
+            "completed_steps": [],
+            "error": None,
+        }
+    background_tasks.add_task(_run_agent_background, session_id, request.query)
+    return SimulateStartedResponse(session_id=session_id, status="running")
 
-    final_state = run_agent(request.query)
-    latency_ms = (time.perf_counter() - start) * 1000
 
-    solver_config = final_state.get("solver_config") or {}
-    response = SimulateResponse(
+@router.get("/sessions/{session_id}/status", response_model=SimulationStatusResponse)
+def get_session_status(session_id: str) -> SimulationStatusResponse:
+    """Report live progress for an in-flight (or just-finished) /simulate run.
+
+    Args:
+        session_id: The session identifier returned by POST /simulate.
+
+    Returns:
+        The current status, node, and completed-step trace for this run.
+
+    Raises:
+        HTTPException: 404 if no session with the given id was started
+            (in-memory progress is not persisted across API restarts:
+            GET /sessions/{session_id} still works for completed runs from
+            a previous process via the on-disk store).
+    """
+    with _session_progress_lock:
+        progress = _session_progress.get(session_id)
+    if progress is None:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
+    return SimulationStatusResponse(
         session_id=session_id,
-        solver=solver_config.get("solver_name"),
-        turbulence_model=solver_config.get("turbulence_model"),
-        generated_files=final_state.get("generated_files", {}),
-        validation=final_state.get("validation_results", {}),
-        explanation=final_state.get("final_response", ""),
-        citations=final_state.get("citations", []),
-        latency_ms=latency_ms,
-        error=final_state.get("error"),
+        status=progress["status"],
+        current_node=progress["current_node"],
+        completed_steps=list(progress["completed_steps"]),
+        error=progress["error"],
     )
-
-    sessions = _load_sessions()
-    sessions[session_id] = {
-        "session_id": session_id,
-        "query": request.query,
-        "response": response.model_dump(mode="json"),
-        "created_at": datetime.now(UTC).isoformat(),
-    }
-    _save_sessions(sessions)
-
-    return response
 
 
 def _check_ollama_reachable() -> bool:

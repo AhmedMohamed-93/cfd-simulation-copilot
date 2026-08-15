@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
-from src.agent.graph import _route_after_retrieval, _route_after_validation
+from src.agent.graph import _route_after_retrieval, _route_after_validation, run_agent
 from src.agent.state import initial_state
 from src.agent.tools import (
     _extract_json,
@@ -16,7 +17,14 @@ from src.agent.tools import (
     format_final_response,
     select_solver_and_models,
 )
-from src.generation.schemas import FlowDescription, SolverName, TurbulenceModel, ValidationResult
+from src.generation.schemas import (
+    FlowDescription,
+    SimulationType,
+    SolverConfiguration,
+    SolverName,
+    TurbulenceModel,
+    ValidationResult,
+)
 
 
 class _FakeLLMClient:
@@ -136,7 +144,7 @@ def test_rule_based_solver_selection_external_aero_never_selects_buoyant_solver(
     """Regression test: external aerodynamics must never fall through to a buoyant solver.
 
     Even with a mis-set temperature_dependent=True flag, an airfoil/wing/NACA
-    geometry must route to simpleFoam/rhoSimpleFoam, not buoyantSimpleFoam —
+    geometry must route to simpleFoam/rhoSimpleFoam, not buoyantSimpleFoam:
     external aerodynamics is checked before temperature_dependent.
     """
     flow = FlowDescription(
@@ -170,7 +178,7 @@ def test_rule_based_solver_selection_cavity_selects_icofoam():
 
     Regression test: evaluation on this exact scenario (tc04) showed the
     fallback picking pimpleFoam instead, because it had no icoFoam branch at
-    all — icoFoam is OpenFOAM's own bundled tutorial solver for this case.
+    all; icoFoam is OpenFOAM's own bundled tutorial solver for this case.
     """
     flow = FlowDescription(
         reynolds_number=1000,
@@ -188,7 +196,7 @@ def test_rule_based_solver_selection_cylinder_wake_does_not_select_icofoam():
     """A non-cavity laminar unsteady case (cylinder wake) stays on pimpleFoam.
 
     icoFoam is deliberately scoped to the canonical cavity-type validation
-    cases, not any low-Re unsteady flow — a cylinder vortex-shedding case at
+    cases, not any low-Re unsteady flow: a cylinder vortex-shedding case at
     the same Reynolds number should not be swept into the cavity branch.
     """
     flow = FlowDescription(
@@ -206,7 +214,7 @@ def test_rule_based_solver_selection_external_aero_turbulent_prefers_spalart_all
     """External aerodynamics above the laminar threshold prefers SpalartAllmaras.
 
     Regression test: evaluation on the NACA0012 case (tc05) showed the
-    fallback always choosing kOmegaSST, never SpalartAllmaras — the
+    fallback always choosing kOmegaSST, never SpalartAllmaras, the
     standard, economical choice for attached external aero flow.
     """
     flow = FlowDescription(
@@ -225,7 +233,7 @@ def test_rule_based_solver_selection_transonic_airfoil_does_not_select_spalart_a
 
     Regression test: evaluation suite case tc15 ("Transonic flow over a
     supercritical airfoil at Mach 0.78... shock/boundary-layer interaction")
-    expects kOmegaSST — a blanket "any external aero -> SpalartAllmaras"
+    expects kOmegaSST: a blanket "any external aero -> SpalartAllmaras"
     rule would get this wrong.
     """
     flow = FlowDescription(
@@ -244,7 +252,7 @@ def test_rule_based_solver_selection_turbine_blade_does_not_select_spalart_allma
     """A wind turbine blade does not get SpalartAllmaras from the fallback.
 
     Regression test: evaluation suite case tc20 ("Turbulent external flow
-    over a wind turbine blade section") expects kOmegaSST — external
+    over a wind turbine blade section") expects kOmegaSST: external
     aerodynamics keyword matching alone is too broad for the SpalartAllmaras
     preference; it must be scoped to airfoil/wing/NACA geometries.
     """
@@ -265,7 +273,7 @@ def test_select_solver_and_models_overrides_turbulence_preference_for_low_speed_
     Regression test for evaluation case tc05: the LLM's own solver pick
     (simpleFoam) was correct, but its turbulence pick (kOmegaSST) merely
     passed the coarse laminar/non-laminar check without matching the
-    case-type standard — this is what the turbulence_model_preference check
+    case-type standard: this is what the turbulence_model_preference check
     is for, distinct from reynolds_turbulence_consistency.
     """
     flow = FlowDescription(
@@ -290,6 +298,38 @@ def test_select_solver_and_models_overrides_turbulence_preference_for_low_speed_
     assert config.turbulence_model == TurbulenceModel.SPALART_ALLMARAS
     assert "corrected LLM proposal of 'kOmegaSST'" in config.justification
     assert "turbulence_model_preference" in config.justification
+
+
+def test_select_solver_and_models_overrides_solver_disagreeing_with_flow_steadiness():
+    """select_solver_and_models corrects a self-consistent-but-flow-wrong solver proposal.
+
+    Regression test for a real gap exposed by evaluation (case tc03): the
+    LLM proposed simpleFoam + is_steady=True, internally self-consistent,
+    so the old algorithm-consistency check (config-only) passed it, for a
+    query explicitly describing "Unsteady flow past a circular cylinder...
+    vortex shedding" (flow.is_steady=False). The override must catch this
+    via the flow-vs-config comparison, not just config's own consistency.
+    """
+    flow = FlowDescription(
+        reynolds_number=1000,
+        geometry="flow past a circular cylinder",
+        fluid="air",
+        is_compressible=False,
+        is_steady=False,
+    )
+    fake_client = _FakeLLMClient(
+        {
+            "solver_name": "simpleFoam",
+            "turbulence_model": "kOmegaSST",
+            "is_compressible": False,
+            "is_steady": True,
+            "simulation_type": "RAS",
+            "justification": "(internally consistent but wrong for this flow, for testing)",
+        }
+    )
+    config = select_solver_and_models(flow, retrieved_chunks=[], client=fake_client)
+    assert config.solver_name == SolverName.PIMPLE_FOAM
+    assert config.is_steady is False
 
 
 def test_select_solver_and_models_overrides_solver_only_preserves_turbulence_choice():
@@ -506,7 +546,7 @@ def test_select_solver_and_models_keeps_valid_llm_choice():
         {
             "solver_name": "simpleFoam",
             # SpalartAllmaras is the standard choice for a low-speed
-            # NACA0012 airfoil (see turbulence_model_preference) — this is
+            # NACA0012 airfoil (see turbulence_model_preference); this is
             # what makes the whole answer "physically sound" and therefore
             # not subject to override.
             "turbulence_model": "SpalartAllmaras",
@@ -524,10 +564,10 @@ def test_select_solver_and_models_keeps_valid_llm_choice():
 def test_format_final_response_citation_line_shows_title_relevance_and_quality(
     laminar_pipe_flow, solver_config_laminar
 ):
-    """A citation renders as 'title — relevance X% (quality match)'.
+    """A citation renders as 'title, relevance X% (quality match)'.
 
     Every ingested title already embeds its human-readable category (e.g.
-    "OpenFOAM User Guide: Meshing Guidelines" — see document_loader.py);
+    "OpenFOAM User Guide: Meshing Guidelines"; see document_loader.py);
     `source` is a separate internal slug ("openfoam-user-guide-synthetic"),
     not a display name, so it must not be prepended to the title.
 
@@ -562,8 +602,8 @@ def test_format_final_response_citation_line_shows_title_relevance_and_quality(
         validation_result=ValidationResult(findings=[]),
         citations=citations,
     )
-    assert "OpenFOAM User Guide: Meshing Guidelines — relevance 100% (strong match)" in response
-    assert "CFD-Online Wiki: Reynolds stress model — relevance 99% (weak match)" in response
+    assert "OpenFOAM User Guide: Meshing Guidelines, relevance 100% (strong match)" in response
+    assert "CFD-Online Wiki: Reynolds stress model, relevance 99% (weak match)" in response
     assert "openfoam-user-guide-synthetic" not in response
 
 
@@ -682,3 +722,101 @@ def test_route_after_validation_proceeds_when_passed():
     state["validation_retries"] = 0
     state["validation_results"] = ValidationResult(findings=[]).model_dump(mode="json")
     assert _route_after_validation(state) == "format_final_response"
+
+
+def test_run_agent_streams_progress_via_on_step_callback():
+    """run_agent's on_step callback fires once per node, in graph order.
+
+    Regression test for switching run_agent's internals from .invoke() to
+    manually consuming .stream(..., stream_mode="updates"); this must
+    still traverse every node exactly as before and produce an equivalent
+    final state, while additionally reporting live progress (needed so the
+    API can report which step a long local-Ollama run is on).
+
+    Every tool call is mocked so this stays fast and deterministic (no real
+    LLM, Qdrant, or embedding model calls), and the fakes are chosen to
+    pass on the first try (retrieval quality above threshold, validation
+    passed) so the graph takes the single-pass route with no retry loops.
+    """
+    fake_flow = FlowDescription(
+        geometry="pipe", reynolds_number=50000, fluid="water", is_steady=True, is_compressible=False
+    )
+    fake_config = SolverConfiguration(
+        solver_name=SolverName.SIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.K_OMEGA_SST,
+        is_compressible=False,
+        is_steady=True,
+        simulation_type=SimulationType.RAS,
+        justification="test",
+    )
+    fake_files = {"system/controlDict": "dummy content"}
+    fake_validation = ValidationResult(findings=[])
+
+    with (
+        patch("src.agent.graph.CFDRetriever"),
+        patch("src.agent.graph.agent_tools.parse_flow_description", return_value=fake_flow),
+        patch(
+            "src.agent.graph.agent_tools.retrieve_cfd_knowledge",
+            return_value={"chunks": [], "quality": 1.0, "aspect": "solver selection"},
+        ),
+        patch("src.agent.graph.agent_tools.select_solver_and_models", return_value=fake_config),
+        patch("src.agent.graph.agent_tools.generate_openfoam_case_files", return_value=fake_files),
+        patch("src.agent.graph.agent_tools.validate_case_physics", return_value=fake_validation),
+        patch("src.agent.graph.agent_tools.format_final_response", return_value="## done"),
+    ):
+        seen_nodes: list[str] = []
+        final_state = run_agent(
+            "Turbulent pipe flow at Re=50000",
+            on_step=lambda node_name, _state: seen_nodes.append(node_name),
+        )
+
+    assert seen_nodes == [
+        "parse_flow_description",
+        "retrieve_cfd_knowledge",
+        "select_solver_and_models",
+        "generate_openfoam_files",
+        "validate_physics",
+        "format_final_response",
+    ]
+    assert final_state["final_response"] == "## done"
+    assert final_state["error"] is None
+    assert final_state["solver_config"]["solver_name"] == "simpleFoam"
+
+
+def test_run_agent_without_on_step_behaves_like_before():
+    """run_agent(query) with no callback still returns the same final state.
+
+    Ensures the .invoke() -> manual .stream() switch didn't change default
+    (no-callback) behavior for existing callers (e.g. the evaluation script).
+    """
+    fake_flow = FlowDescription(
+        geometry="pipe", reynolds_number=500, fluid="water", is_steady=True, is_compressible=False
+    )
+    fake_config = SolverConfiguration(
+        solver_name=SolverName.SIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.LAMINAR,
+        is_compressible=False,
+        is_steady=True,
+        simulation_type=SimulationType.LAMINAR,
+        justification="test",
+    )
+    fake_files = {"system/controlDict": "dummy content"}
+    fake_validation = ValidationResult(findings=[])
+
+    with (
+        patch("src.agent.graph.CFDRetriever"),
+        patch("src.agent.graph.agent_tools.parse_flow_description", return_value=fake_flow),
+        patch(
+            "src.agent.graph.agent_tools.retrieve_cfd_knowledge",
+            return_value={"chunks": [], "quality": 1.0, "aspect": "solver selection"},
+        ),
+        patch("src.agent.graph.agent_tools.select_solver_and_models", return_value=fake_config),
+        patch("src.agent.graph.agent_tools.generate_openfoam_case_files", return_value=fake_files),
+        patch("src.agent.graph.agent_tools.validate_case_physics", return_value=fake_validation),
+        patch("src.agent.graph.agent_tools.format_final_response", return_value="## done"),
+    ):
+        final_state = run_agent("Laminar pipe flow at Re=500")
+
+    assert final_state["final_response"] == "## done"
+    assert final_state["error"] is None
+    assert final_state["reasoning_steps"]

@@ -12,17 +12,53 @@ class SimulateRequest(BaseModel):
 
     Attributes:
         query: Natural-language description of the CFD simulation problem.
-        stream: Whether to stream intermediate agent steps (reserved for
-            future use; the current implementation returns a single
-            synchronous response regardless of this flag).
     """
 
     query: str = Field(..., min_length=1, description="Natural language CFD problem description.")
-    stream: bool = Field(default=False, description="Reserved for future streaming support.")
+
+
+class SimulateStartedResponse(BaseModel):
+    """Response body for POST /simulate.
+
+    The agent run happens in a background task (a local Ollama run can take
+    a couple of minutes on CPU); this response returns immediately.
+    Poll GET /sessions/{session_id}/status for live progress, then fetch
+    GET /sessions/{session_id} for the full SimulateResponse once its
+    status is "complete".
+
+    Attributes:
+        session_id: Unique identifier for this simulation session.
+        status: Always "running" at this point.
+    """
+
+    session_id: str
+    status: str
+
+
+class SimulationStatusResponse(BaseModel):
+    """Response body for GET /sessions/{session_id}/status.
+
+    Attributes:
+        session_id: The session identifier.
+        status: "running", "complete", or "error".
+        current_node: The agent graph node currently executing (or the last
+            one that completed), or None if the run hasn't reported its
+            first completed node yet.
+        completed_steps: Human-readable trace entries for each node
+            completed so far, in order (same format as
+            AgentState.reasoning_steps).
+        error: Error message if status is "error", else None.
+    """
+
+    session_id: str
+    status: str
+    current_node: str | None
+    completed_steps: list[str]
+    error: str | None = None
 
 
 class SimulateResponse(BaseModel):
-    """Response body for POST /simulate.
+    """Full simulation result, returned by GET /sessions/{session_id} once complete.
 
     Attributes:
         session_id: Unique identifier for this simulation session.

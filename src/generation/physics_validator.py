@@ -39,7 +39,7 @@ _COMPRESSIBLE_ONLY_SOLVERS = {SolverName.RHO_SIMPLE_FOAM, SolverName.RHO_PIMPLE_
 _LOW_SPEED_MACH_THRESHOLD = 0.3
 
 # 2300 is the classic Hagen-Poiseuille INTERNAL PIPE FLOW transition
-# Reynolds number — it does not apply to external bluff-body wakes, whose
+# Reynolds number. It does not apply to external bluff-body wakes, whose
 # well-documented vortex-shedding transition regimes sit far lower (2D
 # cylinder shedding is already unsteady/transitional by Re~200-300, long
 # before a wall-bounded pipe flow would transition). Applying the pipe
@@ -49,7 +49,7 @@ _BLUFF_BODY_KEYWORDS = ("cylinder", "sphere", "bluff body", "bluff-body")
 _BLUFF_BODY_LAMINAR_TO_TURBULENT_RE = 300.0
 
 # icoFoam is OpenFOAM's own bundled tutorial solver for exactly this case
-# type (its tutorials are literally named cavity/cavityClipped/...) — see
+# type (its tutorials are literally named cavity/cavityClipped/...); see
 # _check_solver_domain_consistency's cavity clause below.
 _CAVITY_KEYWORDS = ("cavity", "lid-driven", "lid driven")
 
@@ -58,7 +58,7 @@ _CAVITY_KEYWORDS = ("cavity", "lid-driven", "lid driven")
 # SpalartAllmaras is the industry-standard, economical choice. The broader
 # external-aero keyword set also matches bluffer or more complex geometries
 # (turbine blades, buildings) and doesn't distinguish low-speed attached
-# flow from high-speed/transonic — both of which make kOmegaSST the better
+# flow from high-speed/transonic, both of which make kOmegaSST the better
 # default instead (verified against the full evaluation suite: an airfoil
 # at Mach 0.78 with shock/boundary-layer interaction, and a wind turbine
 # blade section, both expect kOmegaSST, not SpalartAllmaras).
@@ -73,7 +73,7 @@ def _prefers_spalart_allmaras(flow: FlowDescription) -> bool:
     transonic/compressible aero (shock/boundary-layer interaction favors
     kOmegaSST) and for bluffer or more complex external geometries (turbine
     blades, buildings), where separation is common enough that kOmegaSST is
-    the safer default — see _ATTACHED_FLOW_AERO_KEYWORDS.
+    the safer default; see _ATTACHED_FLOW_AERO_KEYWORDS.
 
     Args:
         flow: The parsed flow description.
@@ -86,12 +86,44 @@ def _prefers_spalart_allmaras(flow: FlowDescription) -> bool:
     return is_attached_flow_aero and not is_high_speed_or_compressible
 
 
+# kEpsilon is the standard choice only for genuinely free-shear flows with
+# no nearby dominant wall (jets, two streams mixing/merging, shear layers),
+# verified against the full evaluation suite: a T-junction mixing case
+# expects kEpsilon, but ordinary wall-bounded internal flow (a plain pipe)
+# and a near-body bluff wake (a cylinder) both expect kOmegaSST despite
+# also being turbulent and non-aero. Deliberately narrow for the same
+# whack-a-mole reason as _ATTACHED_FLOW_AERO_KEYWORDS above.
+_FREE_SHEAR_KEYWORDS = ("jet", "mixing", "merging", "shear layer", "co-flow", "coflow")
+
+
+def _prefers_free_shear_kepsilon(flow: FlowDescription) -> bool:
+    """Whether kEpsilon is the standard turbulence model for this flow.
+
+    True only for genuinely free-shear flows (jets, mixing/merging streams,
+    shear layers) with no nearby dominant wall, and for multiphase
+    free-surface flows (kEpsilon is OpenFOAM's own tutorial default for
+    interFoam cases, e.g. damBreak). False otherwise: ordinary wall-bounded
+    internal flow and near-body bluff-body wakes default to kOmegaSST even
+    though they're also turbulent and non-aero (see
+    _check_turbulence_model_preference).
+
+    Args:
+        flow: The parsed flow description.
+
+    Returns:
+        True if this is a case kEpsilon is the standard choice for.
+    """
+    if flow.multiphase:
+        return True
+    return any(kw in flow.geometry.lower() for kw in _FREE_SHEAR_KEYWORDS)
+
+
 def _laminar_to_turbulent_threshold(geometry: str) -> float:
     """Return the Reynolds number above which a flow is no longer laminar.
 
     Geometry-aware: bluff-body wakes (cylinders, spheres) transition to an
     unsteady/turbulence-relevant regime at a much lower Reynolds number than
-    the classic internal-pipe-flow value of 2300 — see the constants above.
+    the classic internal-pipe-flow value of 2300; see the constants above.
 
     Args:
         geometry: The flow description's geometry field (free text).
@@ -122,7 +154,7 @@ def is_external_aerodynamics_geometry(geometry: str) -> bool:
 
     Shared with `src.agent.tools`, which uses the same heuristic to steer
     solver selection away from buoyant solvers before generation, not just
-    to flag it afterward — see `_check_solver_domain_consistency` below for
+    to flag it afterward; see `_check_solver_domain_consistency` below for
     the corresponding post-hoc safety net.
 
     Args:
@@ -141,7 +173,7 @@ def _check_reynolds_turbulence_consistency(
     """Check that the turbulence model choice matches the Reynolds number.
 
     The laminar-to-turbulent threshold is geometry-aware (see
-    `_laminar_to_turbulent_threshold`) — a cylinder/sphere wake transitions
+    `_laminar_to_turbulent_threshold`): a cylinder/sphere wake transitions
     at a much lower Re than an internal pipe flow.
 
     Args:
@@ -189,15 +221,25 @@ def _check_reynolds_turbulence_consistency(
 def _check_turbulence_model_preference(
     flow: FlowDescription, config: SolverConfiguration
 ) -> ValidationFinding:
-    """Check that SpalartAllmaras is used for the case type it's standard for.
+    """Check that SpalartAllmaras/kEpsilon are used only for the case types they're standard for.
 
     Narrower and more specific than `_check_reynolds_turbulence_consistency`
     (which only distinguishes laminar vs. non-laminar): this catches an LLM
-    picking a technically-valid-but-non-standard non-laminar model (e.g.
-    kOmegaSST) for a case where SpalartAllmaras is the expected, standard
-    answer — see `_prefers_spalart_allmaras`. Only checked once the flow is
-    confirmed non-laminar; laminar-regime mismatches are
-    `_check_reynolds_turbulence_consistency`'s concern.
+    picking a technically-valid-but-non-standard non-laminar model for a
+    case type with a different expected standard answer:
+
+    1. SpalartAllmaras is expected for low-speed, attached-flow external
+       aerodynamics (airfoil/wing/NACA); see `_prefers_spalart_allmaras`.
+       Picking anything else there is flagged.
+    2. kEpsilon is expected only for genuinely free-shear or multiphase
+       flows; see `_prefers_free_shear_kepsilon`. Picking kEpsilon
+       anywhere else (ordinary wall-bounded internal flow, a near-body
+       bluff-body wake) is flagged, since it's a common but non-standard
+       choice there; kOmegaSST/SpalartAllmaras (whichever applies) is
+       expected instead.
+
+    Only checked once the flow is confirmed non-laminar; laminar-regime
+    mismatches are `_check_reynolds_turbulence_consistency`'s concern.
 
     Args:
         flow: The parsed flow description.
@@ -224,6 +266,16 @@ def _check_turbulence_model_preference(
                 "aerodynamics case (airfoil/wing/NACA profile)"
             ),
         )
+    if config.turbulence_model == TurbulenceModel.K_EPSILON and not _prefers_free_shear_kepsilon(flow):
+        return ValidationFinding(
+            rule="turbulence_model_preference",
+            severity=ValidationSeverity.ERROR,
+            message=(
+                "'kEpsilon' was selected, but this is not a free-shear or multiphase flow. "
+                "kEpsilon is non-standard for ordinary wall-bounded or bluff-body flow; "
+                "kOmegaSST (or SpalartAllmaras, if applicable) is expected instead"
+            ),
+        )
     return ValidationFinding(
         rule="turbulence_model_preference",
         severity=ValidationSeverity.PASS,
@@ -239,25 +291,25 @@ def _check_solver_domain_consistency(
     Two specific, physically nonsensical mistakes are caught here:
 
     1. Buoyant solvers (buoyantSimpleFoam, buoyantPimpleFoam) model
-       buoyancy-driven flows — density differences from temperature are the
+       buoyancy-driven flows: density differences from temperature are the
        thing driving the motion (a heated cavity, a thermal plume, a heated
        room). Flow around an external body (an airfoil, wing, fuselage,
        aircraft, blade) is driven by the free-stream/inlet velocity, not
-       buoyancy, even when compressible or thermal effects also matter — so
+       buoyancy, even when compressible or thermal effects also matter, so
        a buoyant solver for that geometry is wrong regardless of any other
        flag (e.g. a mis-set temperature_dependent flag) that led to it.
     2. A compressible solver (rhoSimpleFoam, rhoPimpleFoam) for a flow that
-       is explicitly low-speed (Mach < 0.3) and incompressible — internal or
-       external, it doesn't matter: compressibility effects are negligible
+       is explicitly low-speed (Mach < 0.3) and incompressible (internal or
+       external, it doesn't matter): compressibility effects are negligible
        there, so simpleFoam/pimpleFoam is the correct family. This check is
        geometry-independent (unlike the buoyant check above) because the
-       same reasoning error — reaching for a "rho*" solver anyway, seemingly
+       same reasoning error (reaching for a "rho*" solver anyway, seemingly
        triggered by a high Reynolds number rather than an actual speed/Mach
-       signal — was observed for ordinary internal pipe flow just as often
+       signal) was observed for ordinary internal pipe flow just as often
        as for external aerodynamics.
     3. A non-icoFoam solver for a canonical cavity-type case (laminar,
        unsteady, incompressible, geometry matching lid-driven-cavity
-       keywords) — a general-purpose transient solver like pimpleFoam is
+       keywords): a general-purpose transient solver like pimpleFoam is
        not physically wrong here, but icoFoam is OpenFOAM's own bundled
        tutorial solver for exactly this case type, so it's the expected,
        standard answer rather than an equally-valid-but-nonstandard
@@ -278,7 +330,7 @@ def _check_solver_domain_consistency(
             severity=ValidationSeverity.ERROR,
             message=(
                 "buoyant solvers are for buoyancy-driven flows, not external "
-                "aerodynamics — use simpleFoam or rhoSimpleFoam"
+                "aerodynamics; use simpleFoam or rhoSimpleFoam"
             ),
         )
 
@@ -289,7 +341,7 @@ def _check_solver_domain_consistency(
             severity=ValidationSeverity.ERROR,
             message=(
                 f"'{config.solver_name.value}' is a compressible solver, but this flow is "
-                "low-speed (Mach < 0.3) and incompressible — use simpleFoam or pimpleFoam instead"
+                "low-speed (Mach < 0.3) and incompressible; use simpleFoam or pimpleFoam instead"
             ),
         )
 
@@ -308,7 +360,7 @@ def _check_solver_domain_consistency(
             severity=ValidationSeverity.ERROR,
             message=(
                 f"'{config.solver_name.value}' was selected for a canonical lid-driven-cavity "
-                "case (laminar, unsteady, incompressible) — icoFoam is the standard, expected "
+                "case (laminar, unsteady, incompressible): icoFoam is the standard, expected "
                 "solver for this case type"
             ),
         )
@@ -320,17 +372,32 @@ def _check_solver_domain_consistency(
     )
 
 
-def _check_solver_algorithm_consistency(config: SolverConfiguration) -> ValidationFinding:
+def _check_solver_algorithm_consistency(
+    flow: FlowDescription, config: SolverConfiguration
+) -> ValidationFinding:
     """Check that the chosen solver's SIMPLE/PIMPLE algorithm matches is_steady.
 
     controlDict/fvSolution generation picks the ddt scheme and relaxation
-    factors from `is_steady` independently of `solver_name` (see
-    `openfoam_generator.py`), so a mismatch — e.g. buoyantPimpleFoam (a
-    transient-only solver) selected alongside is_steady=True — produces an
-    internally inconsistent case: the application name implies transient
-    time-stepping, but the generated schemes say steadyState.
+    factors from `config.is_steady` independently of `solver_name` (see
+    `openfoam_generator.py`), so this checks two related mismatches that
+    both produce the same class of broken case (application name implies
+    one algorithm, generated schemes say another):
+
+    1. Internal consistency: config.solver_name's mandatory algorithm vs
+       config.is_steady itself, e.g. buoyantPimpleFoam (transient-only)
+       alongside is_steady=True.
+    2. Consistency with the actual flow: config.is_steady vs flow.is_steady.
+       An LLM can propose an internally self-consistent pair (e.g.
+       simpleFoam + is_steady=True) that still disagrees with an explicitly
+       unsteady flow description (e.g. "unsteady flow past a cylinder"),
+       passing check 1 while still recommending the wrong solver family
+       for the actual problem. Caught this way rather than folding
+       `flow.is_steady` into `select_solver_and_models`'s solver_name
+       decision directly, since is_steady is itself part of what the LLM
+       (or the rule-based fallback) is choosing, not a given.
 
     Args:
+        flow: The parsed flow description.
         config: The agent's chosen solver configuration.
 
     Returns:
@@ -352,6 +419,16 @@ def _check_solver_algorithm_consistency(config: SolverConfiguration) -> Validati
             message=(
                 f"'{config.solver_name.value}' only implements the transient PIMPLE "
                 "algorithm, but is_steady=True was selected."
+            ),
+        )
+    if config.is_steady != flow.is_steady:
+        return ValidationFinding(
+            rule="solver_algorithm_consistency",
+            severity=ValidationSeverity.ERROR,
+            message=(
+                f"is_steady={config.is_steady} was selected for '{config.solver_name.value}', "
+                f"but the flow description indicates is_steady={flow.is_steady}. The chosen "
+                "solver/scheme family does not match the actual flow regime."
             ),
         )
     return ValidationFinding(
@@ -619,7 +696,9 @@ def validate_physics(
           internal pipe flow).
         - Turbulence model case-type preference (SpalartAllmaras for
           low-speed attached-flow external aerodynamics specifically, not
-          bluffer/high-speed aero cases where kOmegaSST is standard).
+          bluffer/high-speed aero cases where kOmegaSST is standard;
+          kEpsilon only for genuinely free-shear or multiphase flows, not
+          ordinary wall-bounded/bluff-body flow).
         - Solver family vs. flow domain consistency (e.g. no buoyant
           solvers for external aerodynamics, no compressible solvers for
           any low-speed incompressible flow, icoFoam for canonical
@@ -644,7 +723,7 @@ def validate_physics(
         _check_reynolds_turbulence_consistency(flow, config),
         _check_turbulence_model_preference(flow, config),
         _check_solver_domain_consistency(flow, config),
-        _check_solver_algorithm_consistency(config),
+        _check_solver_algorithm_consistency(flow, config),
         _check_cfl_feasibility(flow, generated_files),
         _check_boundary_condition_completeness(generated_files),
         _check_turbulence_intensity_range(generated_files),

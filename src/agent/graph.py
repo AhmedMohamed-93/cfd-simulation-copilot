@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 
 from langgraph.graph import END, StateGraph
 
@@ -280,7 +281,10 @@ def _validation_passed(validation_results: dict) -> bool | None:
     return not any(f.get("severity") == "error" for f in findings)
 
 
-def run_agent(user_query: str) -> AgentState:
+def run_agent(
+    user_query: str,
+    on_step: Callable[[str, AgentState], None] | None = None,
+) -> AgentState:
     """Run the full agent graph end-to-end for a user query.
 
     Every run is recorded as one structured entry in the local agent traces
@@ -288,6 +292,12 @@ def run_agent(user_query: str) -> AgentState:
 
     Args:
         user_query: The user's natural-language CFD problem description.
+        on_step: Optional callback invoked with (node_name, state)
+            immediately after each graph node completes, letting a caller
+            (e.g. the API's background task) report live progress for a
+            run that can take a couple of minutes on local CPU-bound
+            Ollama. Ignored (identical behavior to a plain synchronous run)
+            when omitted.
 
     Returns:
         The final AgentState after the graph run completes.
@@ -296,7 +306,21 @@ def run_agent(user_query: str) -> AgentState:
     state = initial_state(user_query)
     start = time.perf_counter()
     try:
-        final_state = app.invoke(state, config={"recursion_limit": settings.MAX_AGENT_ITERATIONS * 2})
+        # .stream(..., stream_mode="updates") yields one {node_name: state}
+        # dict per completed node (each node function mutates and returns
+        # the whole state, see the node_* functions above), which is what
+        # on_step needs; .invoke() would only surface the final state, with
+        # no visibility into progress along the way. Consuming the stream
+        # to completion and keeping the last state is equivalent to
+        # .invoke()'s return value.
+        for chunk in app.stream(
+            state, config={"recursion_limit": settings.MAX_AGENT_ITERATIONS * 2}, stream_mode="updates"
+        ):
+            for node_name, node_state in chunk.items():
+                state.update(node_state)
+                if on_step is not None:
+                    on_step(node_name, state)
+        final_state = state
     except Exception as exc:  # noqa: BLE001
         logger.exception("Agent graph run failed.")
         state["error"] = str(exc)

@@ -1,7 +1,7 @@
 """Tests for the provider-agnostic LLM client (Hugging Face, Ollama, and
 Mistral are all supported; the active one is set via LLM_PROVIDER).
 
-All provider SDK calls are mocked — these tests never require a Hugging
+All provider SDK calls are mocked, so these tests never require a Hugging
 Face token, a running Ollama server, or any network access.
 """
 

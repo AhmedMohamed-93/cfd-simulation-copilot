@@ -27,13 +27,13 @@ datasets==3.1.0
 
 # --- Optional: local Ollama provider (LLM_PROVIDER=ollama) ---
 # Free and fully local, but requires enough RAM to load the model. Not
-# needed for the default Hugging Face setup — imported lazily.
+# needed for the default Hugging Face setup, imported lazily.
 ollama==0.4.4
 langchain-ollama==0.2.1
 
 # --- Optional: production Mistral API provider (LLM_PROVIDER=mistral) ---
 # Only required if you set LLM_PROVIDER=mistral in .env. Not needed for the
-# default free setup — imported lazily so the app runs fine without these
+# default free setup, imported lazily so the app runs fine without these
 # installed.
 mistralai==1.2.3
 langchain-mistralai==0.2.3

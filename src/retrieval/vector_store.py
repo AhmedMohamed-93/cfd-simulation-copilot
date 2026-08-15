@@ -1,7 +1,7 @@
 """Embedded (serverless) Qdrant vector store operations for the CFD knowledge base.
 
 Uses Qdrant's local/embedded mode (`QdrantClient(path=...)`), which persists
-vectors directly to a folder on disk — no Docker, no server process, and no
+vectors directly to a folder on disk: no Docker, no server process, and no
 network connection required. Embedded-mode storage can only be opened by one
 QdrantClient at a time per path, so every QdrantVectorStore in this process
 shares a single process-wide client instance for a given path rather than
@@ -93,7 +93,7 @@ class QdrantVectorStore:
             self._client.delete_collection(self.collection_name)
             # qdrant-client's embedded/local storage mode has been observed
             # to not fully purge a deleted collection's on-disk segment data
-            # (Storage/RocksDB deletes there are logical, not physical) —
+            # (Storage/RocksDB deletes there are logical, not physical);
             # stale points can otherwise resurface on the next fresh client
             # open in a new process, silently duplicating the "rebuilt" KB.
             # Removing the on-disk collection directory outright guarantees

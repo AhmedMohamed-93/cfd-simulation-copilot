@@ -1,4 +1,4 @@
-"""Single-command launcher for the CFD Simulation Copilot — no Docker needed.
+"""Single-command launcher for the CFD Simulation Copilot, no Docker needed.
 
 Starts the FastAPI backend (uvicorn, in a background thread of this same
 process) and the Streamlit frontend (as a subprocess), waits for the API to

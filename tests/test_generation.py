@@ -11,6 +11,7 @@ from src.generation.physics_validator import (
     _check_solver_algorithm_consistency,
     _check_turbulence_model_preference,
     _laminar_to_turbulent_threshold,
+    _prefers_free_shear_kepsilon,
     _prefers_spalart_allmaras,
     is_external_aerodynamics_geometry,
     validate_physics,
@@ -161,7 +162,7 @@ def test_validate_physics_flags_buoyant_solver_for_external_aerodynamics():
     """A buoyant solver selected for an airfoil case is a critical, physically wrong error.
 
     Regression test for the reported bug: the agent selected buoyantPimpleFoam
-    for a NACA0012 airfoil, which is physically nonsensical — external
+    for a NACA0012 airfoil, which is physically nonsensical: external
     aerodynamics is driven by the free-stream velocity, not buoyancy.
     """
     flow = FlowDescription(
@@ -249,7 +250,7 @@ def test_validate_physics_flags_compressible_solver_for_incompressible_internal_
 
     Regression test: evaluation on turbulent pipe flow (Re=50000) showed the
     same "reaches for rho* because Re is high" mistake for ordinary internal
-    flow, not just external aerodynamics — so this check must not be gated
+    flow, not just external aerodynamics, so this check must not be gated
     on geometry.
     """
     flow = FlowDescription(
@@ -308,7 +309,10 @@ def test_check_solver_algorithm_consistency_flags_pimple_solver_marked_steady():
     marked is_steady=True. Since controlDict generation derives the ddt
     scheme from is_steady independently of solver_name, this mismatch would
     silently produce a broken case (transient solver, steadyState schemes).
+    flow.is_steady is set to match config.is_steady here so this test
+    isolates the internal-contradiction failure mode specifically.
     """
+    flow = FlowDescription(geometry="heated cavity", fluid="air", is_steady=True)
     config = SolverConfiguration(
         solver_name=SolverName.BUOYANT_PIMPLE_FOAM,
         turbulence_model=TurbulenceModel.K_OMEGA_SST,
@@ -317,13 +321,14 @@ def test_check_solver_algorithm_consistency_flags_pimple_solver_marked_steady():
         simulation_type=SimulationType.RAS,
         justification="(deliberately inconsistent, for testing)",
     )
-    finding = _check_solver_algorithm_consistency(config)
+    finding = _check_solver_algorithm_consistency(flow, config)
     assert finding.severity == ValidationSeverity.ERROR
     assert finding.rule == "solver_algorithm_consistency"
 
 
 def test_check_solver_algorithm_consistency_flags_simple_solver_marked_unsteady():
     """simpleFoam (steady-only) with is_steady=False is an internal contradiction."""
+    flow = FlowDescription(geometry="pipe", fluid="air", is_steady=False)
     config = SolverConfiguration(
         solver_name=SolverName.SIMPLE_FOAM,
         turbulence_model=TurbulenceModel.K_OMEGA_SST,
@@ -332,13 +337,14 @@ def test_check_solver_algorithm_consistency_flags_simple_solver_marked_unsteady(
         simulation_type=SimulationType.RAS,
         justification="(deliberately inconsistent, for testing)",
     )
-    finding = _check_solver_algorithm_consistency(config)
+    finding = _check_solver_algorithm_consistency(flow, config)
     assert finding.severity == ValidationSeverity.ERROR
     assert finding.rule == "solver_algorithm_consistency"
 
 
 def test_check_solver_algorithm_consistency_passes_for_matching_pairs():
-    """buoyantSimpleFoam+steady and buoyantPimpleFoam+transient both pass."""
+    """buoyantSimpleFoam+steady and buoyantPimpleFoam+transient both pass, flow included."""
+    steady_flow = FlowDescription(geometry="heated cavity", fluid="air", is_steady=True)
     steady_config = SolverConfiguration(
         solver_name=SolverName.BUOYANT_SIMPLE_FOAM,
         turbulence_model=TurbulenceModel.LAMINAR,
@@ -347,6 +353,7 @@ def test_check_solver_algorithm_consistency_passes_for_matching_pairs():
         simulation_type=SimulationType.LAMINAR,
         justification="Steady natural convection.",
     )
+    transient_flow = FlowDescription(geometry="heated cavity", fluid="air", is_steady=False)
     transient_config = SolverConfiguration(
         solver_name=SolverName.BUOYANT_PIMPLE_FOAM,
         turbulence_model=TurbulenceModel.LAMINAR,
@@ -355,8 +362,43 @@ def test_check_solver_algorithm_consistency_passes_for_matching_pairs():
         simulation_type=SimulationType.LAMINAR,
         justification="Transient natural convection.",
     )
-    assert _check_solver_algorithm_consistency(steady_config).severity == ValidationSeverity.PASS
-    assert _check_solver_algorithm_consistency(transient_config).severity == ValidationSeverity.PASS
+    assert _check_solver_algorithm_consistency(steady_flow, steady_config).severity == ValidationSeverity.PASS
+    assert (
+        _check_solver_algorithm_consistency(transient_flow, transient_config).severity
+        == ValidationSeverity.PASS
+    )
+
+
+def test_check_solver_algorithm_consistency_flags_solver_disagreeing_with_flow_steadiness():
+    """An internally self-consistent config can still disagree with the flow, and must be flagged.
+
+    Regression test for a real gap exposed by evaluation: the LLM proposed
+    simpleFoam + is_steady=True (internally self-consistent, so the old
+    config-only check passed it) for a query explicitly describing
+    "Unsteady flow past a circular cylinder... vortex shedding"
+    (flow.is_steady=False, correctly parsed). The config's own internal
+    consistency says nothing about whether it's the RIGHT algorithm for the
+    actual flow; this must be checked against flow.is_steady directly.
+    """
+    flow = FlowDescription(
+        reynolds_number=1000,
+        geometry="flow past a circular cylinder",
+        fluid="air",
+        is_compressible=False,
+        is_steady=False,
+    )
+    config = SolverConfiguration(
+        solver_name=SolverName.SIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.K_OMEGA_SST,
+        is_compressible=False,
+        is_steady=True,
+        simulation_type=SimulationType.RAS,
+        justification="(internally consistent but wrong for this flow, for testing)",
+    )
+    finding = _check_solver_algorithm_consistency(flow, config)
+    assert finding.severity == ValidationSeverity.ERROR
+    assert finding.rule == "solver_algorithm_consistency"
+    assert "does not match the actual flow regime" in finding.message
 
 
 def test_validate_physics_allows_non_buoyant_solver_for_external_aerodynamics():
@@ -442,7 +484,7 @@ def test_validate_physics_flags_non_icofoam_solver_for_cavity_case():
 
     Regression test: evaluation on the lid-driven cavity case (tc04) showed
     the fallback (before this fix) choosing pimpleFoam, since it had no
-    icoFoam branch at all — icoFoam is OpenFOAM's own bundled tutorial
+    icoFoam branch at all; icoFoam is OpenFOAM's own bundled tutorial
     solver for exactly this case type.
     """
     flow = FlowDescription(
@@ -510,7 +552,7 @@ def test_prefers_spalart_allmaras_false_for_transonic_airfoil():
 
     Regression test: evaluation suite case tc15 ("Transonic flow over a
     supercritical airfoil at Mach 0.78... shock/boundary-layer interaction")
-    expects kOmegaSST, not SpalartAllmaras — a blanket "any airfoil ->
+    expects kOmegaSST, not SpalartAllmaras: a blanket "any airfoil ->
     SpalartAllmaras" rule would get this wrong.
     """
     flow = FlowDescription(
@@ -529,7 +571,7 @@ def test_prefers_spalart_allmaras_false_for_turbine_blade():
 
     Regression test: evaluation suite case tc20 ("Turbulent external flow
     over a wind turbine blade section") expects kOmegaSST, not
-    SpalartAllmaras — external-aerodynamics keyword matching alone
+    SpalartAllmaras: external-aerodynamics keyword matching alone
     (is_external_aerodynamics_geometry) is too broad for this preference;
     it must be scoped to airfoil/wing/NACA specifically.
     """
@@ -588,7 +630,7 @@ def test_check_turbulence_model_preference_passes_spalart_for_low_speed_airfoil(
 
 
 def test_check_turbulence_model_preference_passes_komega_for_transonic_airfoil():
-    """kOmegaSST for a transonic airfoil passes — SpalartAllmaras is not required there."""
+    """kOmegaSST for a transonic airfoil passes: SpalartAllmaras is not required there."""
     flow = FlowDescription(
         reynolds_number=5000000,
         mach_number=0.78,
@@ -610,7 +652,7 @@ def test_check_turbulence_model_preference_passes_komega_for_transonic_airfoil()
 
 
 def test_check_turbulence_model_preference_passes_komega_for_turbine_blade():
-    """kOmegaSST for a turbine blade passes — SpalartAllmaras is not required there."""
+    """kOmegaSST for a turbine blade passes: SpalartAllmaras is not required there."""
     flow = FlowDescription(
         reynolds_number=1000000,
         geometry="Turbulent external flow over a wind turbine blade section",
@@ -646,6 +688,154 @@ def test_check_turbulence_model_preference_not_applicable_in_laminar_regime():
         is_steady=True,
         simulation_type=SimulationType.LAMINAR,
         justification="Laminar regime.",
+    )
+    finding = _check_turbulence_model_preference(flow, config)
+    assert finding.severity == ValidationSeverity.PASS
+
+
+def test_prefers_free_shear_kepsilon_true_for_mixing_junction():
+    """A T-junction stream-mixing flow prefers kEpsilon.
+
+    Mirrors evaluation suite case tc09 ("Turbulent mixing of two air
+    streams... merging in a T-junction"), which expects kEpsilon.
+    """
+    flow = FlowDescription(
+        reynolds_number=20000,
+        geometry="Turbulent mixing of two air streams merging in a T-junction",
+        fluid="air",
+        is_compressible=False,
+        is_steady=False,
+    )
+    assert _prefers_free_shear_kepsilon(flow) is True
+
+
+def test_prefers_free_shear_kepsilon_true_for_multiphase():
+    """A multiphase free-surface flow prefers kEpsilon (OpenFOAM's own damBreak default)."""
+    flow = FlowDescription(
+        reynolds_number=100000,
+        geometry="Dam-break free-surface flow into an air-filled channel",
+        fluid="water",
+        multiphase=True,
+        is_compressible=False,
+        is_steady=False,
+    )
+    assert _prefers_free_shear_kepsilon(flow) is True
+
+
+def test_prefers_free_shear_kepsilon_false_for_pipe():
+    """Ordinary wall-bounded pipe flow does not prefer kEpsilon."""
+    flow = FlowDescription(
+        reynolds_number=50000,
+        geometry="circular pipe",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    assert _prefers_free_shear_kepsilon(flow) is False
+
+
+def test_prefers_free_shear_kepsilon_false_for_cylinder_wake():
+    """A near-body bluff-body wake does not prefer kEpsilon.
+
+    Mirrors evaluation suite case tc03 ("flow past a circular cylinder...
+    vortex shedding"), which expects kOmegaSST, not kEpsilon.
+    """
+    flow = FlowDescription(
+        reynolds_number=1000,
+        geometry="flow past a circular cylinder",
+        fluid="air",
+        is_compressible=False,
+        is_steady=False,
+    )
+    assert _prefers_free_shear_kepsilon(flow) is False
+
+
+def test_check_turbulence_model_preference_flags_kepsilon_for_pipe_flow():
+    """kEpsilon for ordinary turbulent pipe flow is flagged in favor of kOmegaSST.
+
+    Regression test: shortening SOLVER_SELECTION_PROMPT removed the prompt's
+    soft guidance away from kEpsilon for wall-bounded flow, which must now
+    be enforced by the deterministic rule layer instead.
+    """
+    flow = FlowDescription(
+        reynolds_number=50000,
+        geometry="circular pipe",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    config = SolverConfiguration(
+        solver_name=SolverName.SIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.K_EPSILON,
+        is_compressible=False,
+        is_steady=True,
+        simulation_type=SimulationType.RAS,
+        justification="(non-standard for this case type, for testing)",
+    )
+    finding = _check_turbulence_model_preference(flow, config)
+    assert finding.severity == ValidationSeverity.ERROR
+    assert finding.rule == "turbulence_model_preference"
+
+
+def test_check_turbulence_model_preference_passes_kepsilon_for_mixing_junction():
+    """kEpsilon for a genuinely free-shear mixing flow passes cleanly."""
+    flow = FlowDescription(
+        reynolds_number=20000,
+        geometry="Turbulent mixing of two air streams merging in a T-junction",
+        fluid="air",
+        is_compressible=False,
+        is_steady=False,
+    )
+    config = SolverConfiguration(
+        solver_name=SolverName.PIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.K_EPSILON,
+        is_compressible=False,
+        is_steady=False,
+        simulation_type=SimulationType.RAS,
+        justification="Free-shear mixing flow.",
+    )
+    finding = _check_turbulence_model_preference(flow, config)
+    assert finding.severity == ValidationSeverity.PASS
+
+
+def test_check_turbulence_model_preference_passes_kepsilon_for_multiphase():
+    """kEpsilon for a multiphase free-surface flow passes cleanly."""
+    flow = FlowDescription(
+        reynolds_number=100000,
+        geometry="Dam-break free-surface flow into an air-filled channel",
+        fluid="water",
+        multiphase=True,
+        is_compressible=False,
+        is_steady=False,
+    )
+    config = SolverConfiguration(
+        solver_name=SolverName.INTER_FOAM,
+        turbulence_model=TurbulenceModel.K_EPSILON,
+        is_compressible=False,
+        is_steady=False,
+        simulation_type=SimulationType.RAS,
+        justification="Standard damBreak-style configuration.",
+    )
+    finding = _check_turbulence_model_preference(flow, config)
+    assert finding.severity == ValidationSeverity.PASS
+
+
+def test_check_turbulence_model_preference_passes_komega_for_pipe_flow():
+    """kOmegaSST for ordinary turbulent pipe flow still passes (unaffected by the new rule)."""
+    flow = FlowDescription(
+        reynolds_number=50000,
+        geometry="circular pipe",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    config = SolverConfiguration(
+        solver_name=SolverName.SIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.K_OMEGA_SST,
+        is_compressible=False,
+        is_steady=True,
+        simulation_type=SimulationType.RAS,
+        justification="Standard wall-bounded internal flow.",
     )
     finding = _check_turbulence_model_preference(flow, config)
     assert finding.severity == ValidationSeverity.PASS

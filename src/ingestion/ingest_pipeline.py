@@ -25,7 +25,7 @@ def _reset_local_vector_storage() -> None:
     sufficient: qdrant-client's embedded/local storage mode has been
     observed (reproducibly, on Windows) to leave the previous collection's
     on-disk SQLite file locked even after delete_collection() and an
-    explicit client.close() — meaning stale points can silently survive a
+    explicit client.close(), meaning stale points can silently survive a
     "rebuild" and merge with freshly indexed ones under a fresh set of
     point IDs, roughly doubling the collection instead of replacing it.
     Removing the entire storage directory before any client in this

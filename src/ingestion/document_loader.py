@@ -8,7 +8,7 @@ Sources targeted (all public, no auth required):
 
 Every loader is best-effort: network failures, rate limits, schema drift, or
 a live page turning out to be a JS-rendered shell with no real static
-content must never crash ingestion — and must never silently index noise
+content must never crash ingestion, and must never silently index noise
 (nav-menu boilerplate, script/style markup) as if it were real knowledge.
 Each loader extracts and cleans article text (stripping scripts, styles,
 and non-article chrome) and falls back to a rich, hand-authored synthetic
@@ -71,7 +71,7 @@ _DEFAULT_HEADERS = {
 # Below this many characters of *cleaned* article text, a fetched page is
 # treated as unusable (e.g. a JS-rendered shell with no server-rendered
 # content, or a redirect/placeholder page) and the synthetic fallback is
-# used instead. Raw HTML length is not a reliable signal here — boilerplate
+# used instead. Raw HTML length is not a reliable signal here: boilerplate
 # alone easily exceeds this, which is why the check happens post-cleaning.
 _MIN_USEFUL_CONTENT_CHARS = 200
 
@@ -184,9 +184,9 @@ def load_openfoam_tutorials() -> list[RawDocument]:
     """Load real, individually-named OpenFOAM tutorial cases from GitHub.
 
     Uses the git trees API with recursive=1 to fetch the entire repository
-    tree in a single request — avoiding the unauthenticated GitHub API's
+    tree in a single request, avoiding the unauthenticated GitHub API's
     60-requests/hour rate limit, which per-directory listing calls would
-    risk exhausting if crawled level by level — then extracts every actual
+    risk exhausting if crawled level by level, then extracts every actual
     tutorial case directory (four path segments deep:
     tutorials/<category>/<solver>/<caseName>, e.g.
     tutorials/incompressible/simpleFoam/pitzDaily) rather than only the

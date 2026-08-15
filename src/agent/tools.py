@@ -10,7 +10,6 @@ from typing import Any
 from config import settings
 from src.agent.prompts import (
     FLOW_PARSING_PROMPT,
-    RETRIEVAL_QUALITY_PROMPT,
     SOLVER_SELECTION_PROMPT,
     SYSTEM_PROMPT,
 )
@@ -33,12 +32,12 @@ from src.generation.schemas import (
     ValidationResult,
     ValidationSeverity,
 )
-from src.retrieval.retriever import CFDRetriever
+from src.retrieval.retriever import CFDRetriever, compute_retrieval_quality
 
 logger = logging.getLogger(__name__)
 
 # Label for justifications produced by the deterministic decision tree in
-# _rule_based_solver_selection — used both when the LLM fails outright and
+# _rule_based_solver_selection, used both when the LLM fails outright and
 # when it succeeds but a sanity check overrides part of its answer. Framed
 # as a deliberate physics-based decision layer, not a failure path: this
 # check is the actual invariant enforcement the system is designed around,
@@ -129,7 +128,7 @@ def _response_instruction(schema: dict[str, Any]) -> str:
         f"{fields}\n"
         "}\n"
         "Fill in real values based on the input above. Do NOT return this field "
-        "list, type hints, or any schema/description text — only the filled-in "
+        "list, type hints, or any schema/description text: only the filled-in "
         "JSON object."
     )
 
@@ -161,6 +160,10 @@ def parse_flow_description(
                 },
             ],
             temperature=settings.LLM_TEMPERATURE,
+            # FlowDescription is a small, fixed-shape JSON object; capping
+            # generation length is pure latency reduction on local
+            # CPU-bound Ollama, where output length is a direct cost.
+            max_tokens=300,
             json_mode=True,
         )
         data = _extract_json(raw)
@@ -174,9 +177,14 @@ def retrieve_cfd_knowledge(
     flow_description: FlowDescription,
     aspect: str,
     retriever: CFDRetriever | None = None,
-    client: LLMClient | None = None,
 ) -> dict[str, Any]:
-    """Tool 2: retrieve and self-grade CFD knowledge for a specific aspect.
+    """Tool 2: retrieve CFD knowledge for a specific aspect and grade its quality.
+
+    Quality grading is a deterministic read of the cross-encoder's own raw
+    scores (see `compute_retrieval_quality`), not an LLM call. This used
+    to cost one of three LLM round-trips per agent run (~40s each on local
+    CPU-bound Ollama); removing it cuts total agent latency by roughly a
+    third and makes the quality signal reproducible.
 
     Args:
         flow_description: The parsed flow parameters.
@@ -184,14 +192,12 @@ def retrieve_cfd_knowledge(
             "solver selection", "turbulence model", "boundary conditions",
             "numerical schemes", "mesh guidelines".
         retriever: Optional CFDRetriever override (for testing).
-        client: Optional LLMClient override (for testing).
 
     Returns:
         A dict with keys: chunks (list of chunk dicts), quality (float in
         [0, 1]), note (str, present if quality is low).
     """
     retriever = retriever or CFDRetriever()
-    client = client or get_llm_client()
 
     query = (
         f"{aspect} for a flow with geometry '{flow_description.geometry}', "
@@ -200,26 +206,16 @@ def retrieve_cfd_knowledge(
     )
     result = retriever.retrieve(query)
     chunks = result["chunks"]
-
-    chunk_summaries = "\n---\n".join(
-        f"[{c.metadata.get('title', 'untitled')}] {c.content[:300]}" for c in chunks
+    quality = compute_retrieval_quality(chunks)
+    raw_scores = [c.raw_rerank_score for c in chunks if c.raw_rerank_score is not None]
+    mean_raw = sum(raw_scores) / len(raw_scores) if raw_scores else None
+    logger.info(
+        "Retrieval quality for aspect=%r: quality=%.2f (mean raw cross-encoder score=%s, %d chunks)",
+        aspect,
+        quality,
+        f"{mean_raw:.2f}" if mean_raw is not None else "n/a",
+        len(chunks),
     )
-    quality = 0.5
-    if chunks:
-        try:
-            prompt = RETRIEVAL_QUALITY_PROMPT.format(query=query, chunks=chunk_summaries)
-            text = client.complete(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=10,
-            ).strip()
-            match = re.search(r"\d+(\.\d+)?", text)
-            if match:
-                quality = max(0.0, min(1.0, float(match.group())))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Retrieval quality self-grading failed: %s", exc)
-    else:
-        quality = 0.0
 
     output: dict[str, Any] = {
         "chunks": [
@@ -283,20 +279,24 @@ def select_solver_and_models(
                 },
             ],
             temperature=settings.LLM_TEMPERATURE,
+            # SolverConfiguration is a small, fixed-shape JSON object;
+            # capping generation length is pure latency reduction on local
+            # CPU-bound Ollama, where output length is a direct cost.
+            max_tokens=300,
             json_mode=True,
         )
         data = _extract_json(raw)
         config = SolverConfiguration.model_validate(data)
 
         domain_check = _check_solver_domain_consistency(flow_description, config)
-        algorithm_check = _check_solver_algorithm_consistency(config)
+        algorithm_check = _check_solver_algorithm_consistency(flow_description, config)
         reynolds_turbulence_check = _check_reynolds_turbulence_consistency(flow_description, config)
         turbulence_preference_check = _check_turbulence_model_preference(flow_description, config)
 
         solver_bad = ValidationSeverity.ERROR in (domain_check.severity, algorithm_check.severity)
         # A missing Reynolds number also reports non-PASS ("cannot verify")
         # from reynolds_turbulence_check, but that's not evidence the LLM's
-        # choice is wrong — only treat it as bad when Re is known and
+        # choice is wrong; only treat it as bad when Re is known and
         # genuinely inconsistent. turbulence_preference_check is narrower
         # and ERROR-only (e.g. kOmegaSST chosen where SpalartAllmaras is the
         # case-type standard), so no such guard is needed there.
@@ -311,7 +311,7 @@ def select_solver_and_models(
             return config
 
         fallback = _rule_based_solver_selection(flow_description)
-        # Whichever turbulence check actually fired — reynolds_turbulence
+        # Whichever turbulence check actually fired, reynolds_turbulence
         # takes precedence since a laminar/non-laminar mismatch is a more
         # fundamental error than a case-type preference violation.
         turbulence_bad_check = reynolds_turbulence_check if reynolds_turbulence_bad else turbulence_preference_check
@@ -331,13 +331,13 @@ def select_solver_and_models(
         )
 
         # fallback.justification is always "{_PHYSICS_RULES_LABEL}: {reasoning}"
-        # (see _rule_based_solver_selection) — reuse that same reasoning body
+        # (see _rule_based_solver_selection); reuse that same reasoning body
         # so the "corrected LLM proposal" variants below stay in sync with
         # the plain fallback wording without duplicating the format string.
         reasoning = fallback.justification.removeprefix(f"{_PHYSICS_RULES_LABEL}: ")
 
         if solver_bad and turbulence_bad:
-            # Neither half of the LLM's answer can be trusted — replace the
+            # Neither half of the LLM's answer can be trusted, so replace the
             # whole configuration, framed as a correction of what the LLM
             # actually proposed rather than a generic fallback.
             return fallback.model_copy(
@@ -362,7 +362,7 @@ def select_solver_and_models(
                         f"'{config.solver_name.value}'): the '{bad_rule}' rule requires "
                         f"'{fallback.solver_name.value}' for this geometry/speed regime "
                         f"({reasoning}). Turbulence model '{config.turbulence_model.value}' "
-                        "from the original proposal is retained — it passed its own "
+                        "from the original proposal is retained: it passed its own "
                         "consistency check."
                     ),
                 }
@@ -377,7 +377,7 @@ def select_solver_and_models(
                     f"'{config.turbulence_model.value}'): the '{turbulence_bad_check.rule}' rule "
                     f"requires '{fallback.turbulence_model.value}' for this case "
                     f"({reasoning}). Solver '{config.solver_name.value}' from the original "
-                    "proposal is retained — it passed its own consistency check."
+                    "proposal is retained: it passed its own consistency check."
                 ),
             }
         )
@@ -405,7 +405,7 @@ def _rule_based_solver_selection(flow: FlowDescription) -> SolverConfiguration:
     # icoFoam is OpenFOAM's simplest transient incompressible laminar
     # solver, historically bundled with exactly the canonical validation
     # cases this keyword list targets (its own tutorials are named
-    # `cavity`/`cavityClipped`/...) — it is not a general-purpose choice
+    # `cavity`/`cavityClipped`/...); it is not a general-purpose choice
     # for arbitrary laminar unsteady flows (e.g. cylinder vortex shedding
     # at the same Re still wants pimpleFoam), so this is deliberately
     # narrow rather than "any laminar + unsteady flow". Shared with
@@ -416,7 +416,7 @@ def _rule_based_solver_selection(flow: FlowDescription) -> SolverConfiguration:
         solver = SolverName.INTER_FOAM
     elif is_external_aero:
         # External aerodynamics (flow around a body) is never
-        # buoyancy-driven, regardless of temperature_dependent — that flag
+        # buoyancy-driven, regardless of temperature_dependent: that flag
         # can be true for reasons unrelated to what's actually driving the
         # flow (e.g. compressible heating), and buoyant solvers model flows
         # where density differences FROM temperature drive the motion, not
@@ -445,10 +445,10 @@ def _rule_based_solver_selection(flow: FlowDescription) -> SolverConfiguration:
     elif _prefers_spalart_allmaras(flow):
         # SpalartAllmaras is the standard, economical one-equation model for
         # attached external aerodynamic boundary layers (low-speed
-        # airfoils/wings) — the industry-default choice for exactly this
+        # airfoils/wings), the industry-default choice for exactly this
         # case type. Deliberately narrower than "any external aero": a
         # bluffer geometry (turbine blade, building) or a high-speed/
-        # transonic case still wants kOmegaSST — see
+        # transonic case still wants kOmegaSST; see
         # _prefers_spalart_allmaras.
         turbulence = TurbulenceModel.SPALART_ALLMARAS
         sim_type = SimulationType.RAS
@@ -542,9 +542,9 @@ def format_final_response(
 
     lines.append("\n## Physics Validation\n")
     if validation_result.passed:
-        lines.append("**Status: PASSED** — no critical physics errors detected.\n")
+        lines.append("**Status: PASSED.** No critical physics errors detected.\n")
     else:
-        lines.append("**Status: FAILED** — critical physics errors detected.\n")
+        lines.append("**Status: FAILED.** Critical physics errors detected.\n")
     for finding in validation_result.findings:
         icon = {"pass": "✅", "warning": "⚠️", "error": "❌"}[finding.severity.value]
         lines.append(f"- {icon} `{finding.rule}`: {finding.message}")
@@ -555,16 +555,16 @@ def format_final_response(
             # rerank_score is 0-10 (min-max normalized within the retrieval
             # batch, so the top chunk always shows ~100% even when the
             # whole batch is a poor match); display as a 0-100% relevance
-            # figure. match_quality is the absolute floor on top of that —
-            # derived from the raw (pre-normalization) cross-encoder logit,
+            # figure. match_quality is the absolute floor on top of that,
+            # derived from the raw (pre-normalization) cross-encoder logit;
             # it's what lets a citation read "100% relevance (weak match)"
             # instead of implying strong relevance just for ranking first.
-            # title alone (not source: title) — every ingested title already
+            # title alone (not source: title): every ingested title already
             # embeds its human-readable category, e.g. "OpenFOAM User Guide:
             # Meshing Guidelines"; `source` is a separate internal slug
             # (e.g. "openfoam-user-guide-synthetic"), not a display name.
             relevance = (
-                f" — relevance {c['rerank_score'] * 10:.0f}%"
+                f", relevance {c['rerank_score'] * 10:.0f}%"
                 if c.get("rerank_score") is not None
                 else ""
             )
@@ -574,7 +574,7 @@ def format_final_response(
 
         if all(c.get("match_quality") == "weak" for c in citations):
             lines.append(
-                "\n**Note:** retrieval confidence was low for this query — the "
+                "\n**Note:** retrieval confidence was low for this query. The "
                 "recommendation relies primarily on the physics decision rules "
                 "rather than retrieved documentation.\n"
             )

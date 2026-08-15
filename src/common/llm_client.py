@@ -1,7 +1,7 @@
 """Provider-agnostic chat LLM client.
 
 Dispatches to the Hugging Face Inference API by default (free with an HF
-account, no local RAM/GPU required — see LLM_PROVIDER="huggingface"). Two
+account, no local RAM/GPU required; see LLM_PROVIDER="huggingface"). Two
 alternative providers are also supported: a local Ollama server
 (LLM_PROVIDER="ollama", free but requires enough local RAM to load the
 model) and the Mistral API (LLM_PROVIDER="mistral", production/paid). Every
@@ -115,8 +115,8 @@ class LLMClient:
     ) -> str:
         """Run a chat completion against the Hugging Face Inference API.
 
-        Free with a Hugging Face account (https://huggingface.co/settings/tokens)
-        — no local RAM/GPU required, unlike the Ollama provider.
+        Free with a Hugging Face account (https://huggingface.co/settings/tokens),
+        no local RAM/GPU required, unlike the Ollama provider.
 
         Args:
             messages: Chat messages.

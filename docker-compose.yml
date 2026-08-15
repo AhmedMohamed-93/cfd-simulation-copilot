@@ -2,13 +2,13 @@
 # via run.py (see README "Quick Start": python setup.py && python run.py).
 # This file is provided for anyone who prefers a containerized deployment;
 # it is not required and is not part of the default local workflow. Vector
-# storage runs in embedded (serverless) Qdrant mode either way — no separate
-# Qdrant server/container is needed even here — so this only containerizes
+# storage runs in embedded (serverless) Qdrant mode either way, no separate
+# Qdrant server/container is needed even here, so this only containerizes
 # Ollama, the API, and the frontend.
 services:
   # Local LLM server (free, no API key). Runs on CPU by default. To use a
   # GPU instead, install the NVIDIA Container Toolkit on the host and
-  # uncomment the "deploy" block below — Ollama will then automatically
+  # uncomment the "deploy" block below; Ollama will then automatically
   # offload inference to the GPU with no other changes required.
   ollama:
     image: ollama/ollama:latest

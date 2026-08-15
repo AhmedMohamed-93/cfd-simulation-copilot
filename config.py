@@ -8,7 +8,7 @@ the Hugging Face Inference API (free with an HF account, no local RAM/GPU
 needed), embeddings + reranking via local sentence-transformers models,
 vector storage via embedded (serverless) Qdrant, and agent execution traces
 via structured local JSON logs. Docker is never required. The LLM layer is
-provider-pluggable — see LLM_PROVIDER — so the same codebase can also run
+provider-pluggable (see LLM_PROVIDER), so the same codebase can also run
 against a local Ollama server (LLM_PROVIDER=ollama, free but RAM-hungry) or
 the Mistral API for a production deployment (LLM_PROVIDER=mistral).
 """
@@ -63,14 +63,25 @@ class Settings(BaseSettings):
         MAX_AGENT_ITERATIONS: Hard cap on total agent graph steps.
         MAX_RETRIEVAL_ATTEMPTS: Max retrieval retries when quality is low.
         MAX_VALIDATION_RETRIES: Max regeneration retries after validation failure.
-        RETRIEVAL_QUALITY_THRESHOLD: Minimum self-graded retrieval quality.
+        RETRIEVAL_QUALITY_THRESHOLD: Minimum retrieval quality (see
+            compute_retrieval_quality) below which a retry is triggered.
+            Set empirically, not at the func's 0.3/0.9 midpoint: 0.3 (chunks
+            retrieved, but a negative mean raw cross-encoder score) turned
+            out to be the near-universal outcome for the "solver selection"
+            query phrasing specifically (a phrasing/calibration effect on
+            this corpus, not a sign of genuinely poor retrieval), so a 0.5
+            threshold retried on effectively every single agent run. 0.2
+            keeps retrying for 0.0 (no chunks at all, genuinely poor) while
+            no longer retrying on 0.3.
         EMBEDDING_CACHE_PATH: Local JSON file used to cache embeddings.
         AGENT_TRACES_LOG_PATH: Local JSON file that structured agent
             execution traces are appended to (timestamp, query, steps,
-            latency_ms, result) — replaces an external tracing service.
+            latency_ms, result); replaces an external tracing service.
         API_HOST: Host the FastAPI server binds to.
         API_PORT: Port the FastAPI server binds to.
         STREAMLIT_PORT: Port the Streamlit frontend binds to (used by run.py).
+        STREAMLIT_REQUEST_TIMEOUT: Seconds the Streamlit frontend's HTTP
+            client waits before timing out a request to the API.
         DATA_RAW_DIR: Directory holding raw downloaded documents.
         DATA_PROCESSED_DIR: Directory holding chunked/processed documents.
         SESSIONS_DB_PATH: SQLite file used to persist simulation sessions.
@@ -98,7 +109,7 @@ class Settings(BaseSettings):
     MISTRAL_API_KEY: str = Field(default="")
     MISTRAL_MODEL: str = Field(default="mistral-large-latest")
 
-    # --- Qdrant vector database (embedded, serverless — no Docker/server) ---
+    # --- Qdrant vector database (embedded, serverless, no Docker/server) ---
     QDRANT_MODE: str = Field(default="local")
     QDRANT_LOCAL_PATH: str = Field(default="./qdrant_storage")
     QDRANT_COLLECTION_NAME: str = Field(default="cfd_knowledge_base")
@@ -122,7 +133,7 @@ class Settings(BaseSettings):
     MAX_AGENT_ITERATIONS: int = Field(default=10)
     MAX_RETRIEVAL_ATTEMPTS: int = Field(default=2)
     MAX_VALIDATION_RETRIES: int = Field(default=1)
-    RETRIEVAL_QUALITY_THRESHOLD: float = Field(default=0.5)
+    RETRIEVAL_QUALITY_THRESHOLD: float = Field(default=0.2)
 
     # --- Embedding cache ---
     EMBEDDING_CACHE_PATH: str = Field(default="data/processed/embedding_cache.json")
@@ -134,6 +145,10 @@ class Settings(BaseSettings):
     API_HOST: str = Field(default="0.0.0.0")
     API_PORT: int = Field(default=8000)
     STREAMLIT_PORT: int = Field(default=8501)
+    # Local Ollama models run 3 sequential LLM calls per agent run on CPU
+    # (~40s each); the default HTTP client timeout must comfortably exceed
+    # that worst case, not just a single call.
+    STREAMLIT_REQUEST_TIMEOUT: int = Field(default=600)
 
     # --- Data locations ---
     DATA_RAW_DIR: str = Field(default="data/raw")

@@ -42,13 +42,16 @@ def test_health_endpoint_checks_ollama_when_reachable():
     assert response.json()["ollama_reachable"] is True
 
 
-def test_simulate_endpoint_returns_agent_output(tmp_path):
-    """POST /simulate returns the agent's solver, files, and validation output."""
-    import src.api.routes as routes_module
+def _fake_success_state(query: str) -> dict:
+    """Build a fake successful AgentState for mocking run_agent in tests.
 
-    routes_module._SESSIONS_PATH = tmp_path / "sessions.json"
+    Args:
+        query: The user query the fake state should be built for.
 
-    fake_state = initial_state("Turbulent pipe flow at Re=50000")
+    Returns:
+        A dict matching AgentState with a complete, successful result.
+    """
+    fake_state = initial_state(query)
     fake_state["solver_config"] = {
         "solver_name": "simpleFoam",
         "turbulence_model": "kOmegaSST",
@@ -62,20 +65,61 @@ def test_simulate_endpoint_returns_agent_output(tmp_path):
     fake_state["validation_results"] = {"findings": []}
     fake_state["final_response"] = "## Test response"
     fake_state["citations"] = []
+    return fake_state
 
-    with patch("src.api.routes.run_agent", return_value=fake_state):
+
+def test_simulate_endpoint_returns_session_id_immediately(tmp_path):
+    """POST /simulate returns session_id + status='running' without blocking on the agent.
+
+    The agent run happens in a FastAPI background task specifically because
+    a local Ollama run can take a couple of minutes on CPU, and the HTTP
+    response itself must not wait for it.
+    """
+    import src.api.routes as routes_module
+
+    routes_module._SESSIONS_PATH = tmp_path / "sessions.json"
+
+    with patch("src.api.routes.run_agent", return_value=_fake_success_state("Turbulent pipe flow at Re=50000")):
         response = client.post("/simulate", json={"query": "Turbulent pipe flow at Re=50000"})
 
     assert response.status_code == 200
     body = response.json()
-    assert body["solver"] == "simpleFoam"
-    assert body["turbulence_model"] == "kOmegaSST"
-    assert "system/controlDict" in body["generated_files"]
-    assert body["error"] is None
+    assert "session_id" in body
+    assert body["status"] == "running"
 
 
-def test_simulate_endpoint_surfaces_agent_error_without_crashing(tmp_path, monkeypatch):
-    """POST /simulate returns a 200 with an error field if the agent fails internally."""
+def test_simulate_background_run_completes_and_full_result_is_fetchable(tmp_path):
+    """After POST /simulate, status becomes 'complete' and the full result is fetchable.
+
+    TestClient runs FastAPI BackgroundTasks to completion before .post()
+    returns, so the mocked agent run has already finished by the time this
+    test inspects /status and /sessions/{id}.
+    """
+    import src.api.routes as routes_module
+
+    routes_module._SESSIONS_PATH = tmp_path / "sessions.json"
+
+    with patch("src.api.routes.run_agent", return_value=_fake_success_state("Turbulent pipe flow at Re=50000")):
+        started = client.post("/simulate", json={"query": "Turbulent pipe flow at Re=50000"}).json()
+        session_id = started["session_id"]
+
+        status_response = client.get(f"/sessions/{session_id}/status")
+        assert status_response.status_code == 200
+        status_body = status_response.json()
+        assert status_body["status"] == "complete"
+        assert status_body["error"] is None
+
+        result_response = client.get(f"/sessions/{session_id}")
+        assert result_response.status_code == 200
+        result_body = result_response.json()["response"]
+        assert result_body["solver"] == "simpleFoam"
+        assert result_body["turbulence_model"] == "kOmegaSST"
+        assert "system/controlDict" in result_body["generated_files"]
+        assert result_body["error"] is None
+
+
+def test_simulate_status_reports_error_without_crashing(tmp_path):
+    """When the agent fails internally, the session's /status becomes 'error'."""
     import src.api.routes as routes_module
 
     routes_module._SESSIONS_PATH = tmp_path / "sessions.json"
@@ -84,16 +128,50 @@ def test_simulate_endpoint_surfaces_agent_error_without_crashing(tmp_path, monke
     fake_state["error"] = "Something went wrong upstream."
 
     with patch("src.api.routes.run_agent", return_value=fake_state):
-        response = client.post("/simulate", json={"query": "bad query"})
+        started = client.post("/simulate", json={"query": "bad query"}).json()
+        session_id = started["session_id"]
 
-    assert response.status_code == 200
-    assert response.json()["error"] == "Something went wrong upstream."
+        status_response = client.get(f"/sessions/{session_id}/status")
+
+    assert status_response.status_code == 200
+    status_body = status_response.json()
+    assert status_body["status"] == "error"
+    assert status_body["error"] == "Something went wrong upstream."
+
+
+def test_simulate_status_reports_error_when_background_task_crashes(tmp_path):
+    """An unexpected exception in the background task itself still marks the session 'error'.
+
+    Regression coverage for a real hang risk: if anything other than
+    run_agent's own caught graph errors raises (building the response,
+    disk I/O), the session must not get stuck reporting 'running' forever.
+    """
+    import src.api.routes as routes_module
+
+    routes_module._SESSIONS_PATH = tmp_path / "sessions.json"
+
+    with patch("src.api.routes.run_agent", side_effect=RuntimeError("boom")):
+        started = client.post("/simulate", json={"query": "Turbulent pipe flow at Re=50000"}).json()
+        session_id = started["session_id"]
+
+        status_response = client.get(f"/sessions/{session_id}/status")
+
+    assert status_response.status_code == 200
+    status_body = status_response.json()
+    assert status_body["status"] == "error"
+    assert "boom" in status_body["error"]
 
 
 def test_simulate_endpoint_rejects_empty_query():
     """POST /simulate returns a 422 validation error for an empty query string."""
     response = client.post("/simulate", json={"query": ""})
     assert response.status_code == 422
+
+
+def test_session_status_returns_404_for_unknown_id():
+    """GET /sessions/{id}/status returns 404 for a session that was never started."""
+    response = client.get("/sessions/does-not-exist/status")
+    assert response.status_code == 404
 
 
 def test_get_session_returns_404_for_unknown_id(tmp_path):

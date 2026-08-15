@@ -9,7 +9,12 @@ import pytest
 from langchain_core.documents import Document
 
 from src.retrieval.embedder import LocalEmbedder
-from src.retrieval.retriever import CFDRetriever, RetrievedChunk, _match_quality
+from src.retrieval.retriever import (
+    CFDRetriever,
+    RetrievedChunk,
+    _match_quality,
+    compute_retrieval_quality,
+)
 from src.retrieval.vector_store import QdrantVectorStore
 
 
@@ -110,7 +115,7 @@ def test_retriever_score_chunks_min_max_normalizes_across_batch():
     every real-world result toward 0/10, since this project's actual
     corpus (long technical passages + keyword-style queries) reliably
     produces negative cross-encoder logits even for genuinely relevant
-    matches — verified empirically (see _min_max_normalize's docstring).
+    matches; verified empirically (see _min_max_normalize's docstring).
     Min-max normalizing within the batch keeps the score meaningful
     regardless of the corpus's absolute logit range: the best candidate in
     *any* batch reaches 10, the worst reaches 0, matching how the score is
@@ -121,7 +126,7 @@ def test_retriever_score_chunks_min_max_normalizes_across_batch():
     retriever = CFDRetriever(embedder=embedder, vector_store=vector_store)
 
     mock_cross_encoder = MagicMock()
-    # All-negative logits, as observed against the real corpus — a plain
+    # All-negative logits, as observed against the real corpus: a plain
     # sigmoid would have squashed every one of these toward 0/10.
     mock_cross_encoder.predict.return_value = [-10.0, -5.0, 0.0]
 
@@ -161,7 +166,7 @@ def test_retriever_score_chunks_preserves_raw_ranking_order():
     """Min-max normalization is monotonic: it never changes which chunk ranks best.
 
     This is the property that makes the rescaling safe to apply purely as
-    a display fix — it cannot change which chunks get selected as
+    a display fix: it cannot change which chunks get selected as
     citations, only the number shown next to them.
     """
     embedder = MagicMock()
@@ -221,7 +226,7 @@ def test_match_quality_weak_for_raw_score_below_negative_five():
     Regression test: min-max normalization alone would show a chunk like
     this at 99-100% relevance whenever it happens to be the best of a bad
     batch (e.g. "Reynolds stress model" wiki pages surfacing for a laminar
-    pipe flow query) — match_quality is the absolute floor that catches
+    pipe flow query): match_quality is the absolute floor that catches
     that case regardless of batch-relative rank.
     """
     assert _match_quality(-5.01) == "weak"
@@ -259,7 +264,7 @@ def test_retriever_rerank_sets_raw_score_and_match_quality_on_chunks():
     assert by_content["weak"].raw_rerank_score == pytest.approx(-8.0)
     assert by_content["weak"].match_quality == "weak"
     # rerank_score (batch-relative) still spans the full 0-10 range
-    # regardless of the absolute quality band — that's the bug being fixed.
+    # regardless of the absolute quality band; that's the bug being fixed.
     assert by_content["strong"].rerank_score == pytest.approx(10.0)
 
 
@@ -276,3 +281,45 @@ def test_retriever_rerank_match_quality_none_on_cross_encoder_failure():
 
     assert ranked[0].match_quality is None
     assert ranked[0].raw_rerank_score is None
+
+
+def test_compute_retrieval_quality_empty_chunks_is_zero():
+    """No retrieved chunks at all means quality 0.0."""
+    assert compute_retrieval_quality([]) == 0.0
+
+
+def test_compute_retrieval_quality_high_when_mean_raw_score_positive():
+    """A positive mean raw cross-encoder score means high (deterministic) quality.
+
+    Regression/replacement test: this used to be an LLM self-grading call
+    (one of three LLM round-trips per agent run, ~40s each on local
+    CPU-bound Ollama); it's now a direct, deterministic read of the
+    reranker's own raw scores.
+    """
+    chunks = [
+        RetrievedChunk(content="a", metadata={}, dense_score=0.5, raw_rerank_score=2.0),
+        RetrievedChunk(content="b", metadata={}, dense_score=0.5, raw_rerank_score=-1.0),
+    ]
+    # mean = 0.5 > 0
+    assert compute_retrieval_quality(chunks) == pytest.approx(0.9)
+
+
+def test_compute_retrieval_quality_low_when_mean_raw_score_non_positive():
+    """A non-positive mean raw cross-encoder score means low quality."""
+    chunks = [
+        RetrievedChunk(content="a", metadata={}, dense_score=0.5, raw_rerank_score=-1.0),
+        RetrievedChunk(content="b", metadata={}, dense_score=0.5, raw_rerank_score=-3.0),
+    ]
+    assert compute_retrieval_quality(chunks) == pytest.approx(0.3)
+
+
+def test_compute_retrieval_quality_boundary_zero_mean_is_low():
+    """A mean raw score of exactly 0 is not > 0, so quality is low, not high."""
+    chunks = [RetrievedChunk(content="a", metadata={}, dense_score=0.5, raw_rerank_score=0.0)]
+    assert compute_retrieval_quality(chunks) == pytest.approx(0.3)
+
+
+def test_compute_retrieval_quality_neutral_when_no_raw_scores_available():
+    """Falls back to a neutral 0.5 when no chunk has a raw score (cross-encoder failure)."""
+    chunks = [RetrievedChunk(content="a", metadata={}, dense_score=0.5, raw_rerank_score=None)]
+    assert compute_retrieval_quality(chunks) == pytest.approx(0.5)

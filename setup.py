@@ -1,4 +1,4 @@
-"""One-time project setup — no Docker required.
+"""One-time project setup, no Docker required.
 
 Installs Python dependencies into the current environment, downloads the
 local embedding model, and builds the CFD knowledge base (document
@@ -8,7 +8,7 @@ Usage:
     python setup.py
 
 Prerequisites: Python 3.11+, and an HF_API_TOKEN set in .env (free at
-https://huggingface.co/settings/tokens) — see README.md. If you'd rather run
+https://huggingface.co/settings/tokens); see README.md. If you'd rather run
 fully local instead, set LLM_PROVIDER=ollama in .env and pull a model with
 `ollama pull llama3.1:8b` before running this script.
 """
