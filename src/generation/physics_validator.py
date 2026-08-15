@@ -53,6 +53,38 @@ _BLUFF_BODY_LAMINAR_TO_TURBULENT_RE = 300.0
 # _check_solver_domain_consistency's cavity clause below.
 _CAVITY_KEYWORDS = ("cavity", "lid-driven", "lid driven")
 
+# Deliberately narrower than _EXTERNAL_AERO_KEYWORDS: airfoil/wing/NACA-
+# profile geometries are attached, quasi-2D lifting-surface flows where
+# SpalartAllmaras is the industry-standard, economical choice. The broader
+# external-aero keyword set also matches bluffer or more complex geometries
+# (turbine blades, buildings) and doesn't distinguish low-speed attached
+# flow from high-speed/transonic — both of which make kOmegaSST the better
+# default instead (verified against the full evaluation suite: an airfoil
+# at Mach 0.78 with shock/boundary-layer interaction, and a wind turbine
+# blade section, both expect kOmegaSST, not SpalartAllmaras).
+_ATTACHED_FLOW_AERO_KEYWORDS = ("airfoil", "wing", "naca")
+
+
+def _prefers_spalart_allmaras(flow: FlowDescription) -> bool:
+    """Whether SpalartAllmaras is the standard turbulence model for this flow.
+
+    True only for low-speed, incompressible, attached-flow external
+    aerodynamics around an airfoil/wing/NACA profile. False for high-speed/
+    transonic/compressible aero (shock/boundary-layer interaction favors
+    kOmegaSST) and for bluffer or more complex external geometries (turbine
+    blades, buildings), where separation is common enough that kOmegaSST is
+    the safer default — see _ATTACHED_FLOW_AERO_KEYWORDS.
+
+    Args:
+        flow: The parsed flow description.
+
+    Returns:
+        True if this is a case SpalartAllmaras is the standard choice for.
+    """
+    is_attached_flow_aero = any(kw in flow.geometry.lower() for kw in _ATTACHED_FLOW_AERO_KEYWORDS)
+    is_high_speed_or_compressible = flow.is_compressible or (flow.mach_number or 0.0) > _LOW_SPEED_MACH_THRESHOLD
+    return is_attached_flow_aero and not is_high_speed_or_compressible
+
 
 def _laminar_to_turbulent_threshold(geometry: str) -> float:
     """Return the Reynolds number above which a flow is no longer laminar.
@@ -151,6 +183,51 @@ def _check_reynolds_turbulence_consistency(
         rule="reynolds_turbulence_consistency",
         severity=ValidationSeverity.PASS,
         message=f"Turbulence model '{config.turbulence_model.value}' is consistent with Re={re_number:g}.",
+    )
+
+
+def _check_turbulence_model_preference(
+    flow: FlowDescription, config: SolverConfiguration
+) -> ValidationFinding:
+    """Check that SpalartAllmaras is used for the case type it's standard for.
+
+    Narrower and more specific than `_check_reynolds_turbulence_consistency`
+    (which only distinguishes laminar vs. non-laminar): this catches an LLM
+    picking a technically-valid-but-non-standard non-laminar model (e.g.
+    kOmegaSST) for a case where SpalartAllmaras is the expected, standard
+    answer — see `_prefers_spalart_allmaras`. Only checked once the flow is
+    confirmed non-laminar; laminar-regime mismatches are
+    `_check_reynolds_turbulence_consistency`'s concern.
+
+    Args:
+        flow: The parsed flow description.
+        config: The agent's chosen solver configuration.
+
+    Returns:
+        A ValidationFinding describing the result of this check.
+    """
+    re_number = flow.reynolds_number
+    if re_number is None or re_number < _laminar_to_turbulent_threshold(flow.geometry):
+        return ValidationFinding(
+            rule="turbulence_model_preference",
+            severity=ValidationSeverity.PASS,
+            message="Not applicable: Reynolds number unknown or flow is in the laminar regime.",
+        )
+
+    if _prefers_spalart_allmaras(flow) and config.turbulence_model != TurbulenceModel.SPALART_ALLMARAS:
+        return ValidationFinding(
+            rule="turbulence_model_preference",
+            severity=ValidationSeverity.ERROR,
+            message=(
+                f"'{config.turbulence_model.value}' was selected, but SpalartAllmaras is the "
+                "standard, economical choice for this low-speed, attached-flow external "
+                "aerodynamics case (airfoil/wing/NACA profile)"
+            ),
+        )
+    return ValidationFinding(
+        rule="turbulence_model_preference",
+        severity=ValidationSeverity.PASS,
+        message="Turbulence model choice matches the case-type preference.",
     )
 
 
@@ -540,6 +617,9 @@ def validate_physics(
         - Reynolds number vs. turbulence model consistency (geometry-aware:
           bluff-body wakes use a lower laminar/turbulent threshold than
           internal pipe flow).
+        - Turbulence model case-type preference (SpalartAllmaras for
+          low-speed attached-flow external aerodynamics specifically, not
+          bluffer/high-speed aero cases where kOmegaSST is standard).
         - Solver family vs. flow domain consistency (e.g. no buoyant
           solvers for external aerodynamics, no compressible solvers for
           any low-speed incompressible flow, icoFoam for canonical
@@ -562,6 +642,7 @@ def validate_physics(
     """
     findings = [
         _check_reynolds_turbulence_consistency(flow, config),
+        _check_turbulence_model_preference(flow, config),
         _check_solver_domain_consistency(flow, config),
         _check_solver_algorithm_consistency(config),
         _check_cfl_feasibility(flow, generated_files),

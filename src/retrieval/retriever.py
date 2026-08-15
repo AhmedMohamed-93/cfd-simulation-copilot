@@ -81,6 +81,39 @@ def _min_max_normalize(raw_scores: list[float]) -> list[float]:
     return [(s - lo) / (hi - lo) * 10.0 for s in raw_scores]
 
 
+_STRONG_MATCH_THRESHOLD = 0.0
+_MODERATE_MATCH_THRESHOLD = -5.0
+
+
+def _match_quality(raw_score: float | None) -> str | None:
+    """Classify a raw cross-encoder logit into an absolute relevance band.
+
+    Min-max normalization (see `_min_max_normalize`) is batch-relative by
+    design — the best chunk in any batch always displays as 100%, even when
+    every candidate in that batch is genuinely irrelevant (e.g. the
+    knowledge base has nothing on-topic for this query). This absolute
+    floor, based on the raw (pre-normalization) logit, is what lets a
+    citation be shown as "100% relevance (weak match)" instead of silently
+    implying strong relevance whenever it happens to rank first.
+
+    Args:
+        raw_score: The raw cross-encoder logit, or None if unavailable
+            (e.g. the cross-encoder failed and dense-score fallback was
+            used instead, which is not comparable to a logit).
+
+    Returns:
+        "strong" (raw >= 0), "moderate" (-5 <= raw < 0), "weak" (raw < -5),
+        or None if no raw score is available.
+    """
+    if raw_score is None:
+        return None
+    if raw_score >= _STRONG_MATCH_THRESHOLD:
+        return "strong"
+    if raw_score >= _MODERATE_MATCH_THRESHOLD:
+        return "moderate"
+    return "weak"
+
+
 @dataclass
 class RetrievedChunk:
     """A single retrieved and (optionally) reranked knowledge chunk.
@@ -92,13 +125,24 @@ class RetrievedChunk:
         rerank_score: The cross-encoder relevance score, min-max normalized
             to 0-10 relative to the other candidates in the same retrieval
             batch (see `_min_max_normalize`) — the batch's best match scores
-            10, the worst scores 0.
+            10, the worst scores 0. Used for ranking/selection and as the
+            displayed relevance percentage; batch-relative, not an absolute
+            quality signal (see `match_quality`).
+        raw_rerank_score: The cross-encoder's raw (pre-normalization) logit,
+            or None if the cross-encoder failed and a dense-score fallback
+            was used instead. This is what `match_quality` is derived from.
+        match_quality: "strong", "moderate", or "weak" — an absolute
+            relevance band derived from `raw_rerank_score` (see
+            `_match_quality`), independent of how this chunk ranks within
+            its batch. None if `raw_rerank_score` is unavailable.
     """
 
     content: str
     metadata: dict[str, Any]
     dense_score: float
     rerank_score: float | None = field(default=None)
+    raw_rerank_score: float | None = field(default=None)
+    match_quality: str | None = field(default=None)
 
 
 class CFDRetriever:
@@ -165,7 +209,9 @@ class CFDRetriever:
         )
         return chunks, elapsed
 
-    def _score_chunks(self, query: str, chunks: list[RetrievedChunk]) -> list[float]:
+    def _score_chunks(
+        self, query: str, chunks: list[RetrievedChunk]
+    ) -> tuple[list[float], list[float | None]]:
         """Score every chunk's relevance to the query using the local cross-encoder.
 
         Args:
@@ -173,11 +219,16 @@ class CFDRetriever:
             chunks: The candidate chunks to score.
 
         Returns:
-            A list of relevance scores in [0, 10], one per chunk, in the
-            same order as `chunks`, min-max normalized across the batch
-            (see `_min_max_normalize`). Falls back to the dense score
-            (scaled) for every chunk if the cross-encoder fails to load or
-            run.
+            A (normalized_scores, raw_scores) tuple, each a list in the same
+            order as `chunks`. normalized_scores are in [0, 10], min-max
+            normalized across the batch (see `_min_max_normalize`) — used
+            for ranking/selection and the displayed relevance percentage.
+            raw_scores are the pre-normalization cross-encoder logits, used
+            for the absolute `match_quality` band (see `_match_quality`).
+            Falls back to the dense score (scaled) for normalized_scores,
+            and None for every raw_scores entry, if the cross-encoder fails
+            to load or run (a dense-score fallback is not comparable to a
+            cross-encoder logit).
         """
         try:
             cross_encoder = _get_cross_encoder(self._cross_encoder_model)
@@ -188,10 +239,10 @@ class CFDRetriever:
                 query,
                 list(zip([c.metadata.get("title") for c in chunks], raw_scores, strict=True)),
             )
-            return _min_max_normalize(raw_scores)
+            return _min_max_normalize(raw_scores), raw_scores
         except Exception as exc:  # noqa: BLE001
             logger.warning("Cross-encoder reranking failed, falling back to dense scores: %s", exc)
-            return [chunk.dense_score * 10.0 for chunk in chunks]
+            return [chunk.dense_score * 10.0 for chunk in chunks], [None] * len(chunks)
 
     def _rerank(
         self, query: str, chunks: list[RetrievedChunk], top_k: int
@@ -207,9 +258,11 @@ class CFDRetriever:
             A tuple of (top-k reranked chunks, elapsed time in seconds).
         """
         start = time.perf_counter()
-        scores = self._score_chunks(query, chunks)
-        for chunk, score in zip(chunks, scores, strict=True):
-            chunk.rerank_score = score
+        normalized_scores, raw_scores = self._score_chunks(query, chunks)
+        for chunk, norm_score, raw_score in zip(chunks, normalized_scores, raw_scores, strict=True):
+            chunk.rerank_score = norm_score
+            chunk.raw_rerank_score = raw_score
+            chunk.match_quality = _match_quality(raw_score)
         elapsed = time.perf_counter() - start
 
         ranked = sorted(chunks, key=lambda c: c.rerank_score or 0.0, reverse=True)

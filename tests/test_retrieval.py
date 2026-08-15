@@ -9,7 +9,7 @@ import pytest
 from langchain_core.documents import Document
 
 from src.retrieval.embedder import LocalEmbedder
-from src.retrieval.retriever import CFDRetriever, RetrievedChunk
+from src.retrieval.retriever import CFDRetriever, RetrievedChunk, _match_quality
 from src.retrieval.vector_store import QdrantVectorStore
 
 
@@ -97,9 +97,10 @@ def test_retriever_score_chunks_falls_back_on_cross_encoder_failure():
     with patch("src.retrieval.retriever._get_cross_encoder") as mock_get_ce:
         mock_get_ce.side_effect = RuntimeError("model failed to load")
         chunk = RetrievedChunk(content="some content", metadata={}, dense_score=0.8)
-        scores = retriever._score_chunks("query", [chunk])
+        normalized, raw = retriever._score_chunks("query", [chunk])
 
-    assert scores == pytest.approx([8.0])
+    assert normalized == pytest.approx([8.0])
+    assert raw == [None]
 
 
 def test_retriever_score_chunks_min_max_normalizes_across_batch():
@@ -130,9 +131,10 @@ def test_retriever_score_chunks_min_max_normalizes_across_batch():
         RetrievedChunk(content="best match", metadata={}, dense_score=0.3),
     ]
     with patch("src.retrieval.retriever._get_cross_encoder", return_value=mock_cross_encoder):
-        scores = retriever._score_chunks("query", chunks)
+        normalized, raw = retriever._score_chunks("query", chunks)
 
-    assert scores == pytest.approx([0.0, 5.0, 10.0])
+    assert normalized == pytest.approx([0.0, 5.0, 10.0])
+    assert raw == pytest.approx([-10.0, -5.0, 0.0])
 
 
 def test_retriever_score_chunks_neutral_when_scores_indistinguishable():
@@ -149,9 +151,10 @@ def test_retriever_score_chunks_neutral_when_scores_indistinguishable():
         RetrievedChunk(content="b", metadata={}, dense_score=0.1),
     ]
     with patch("src.retrieval.retriever._get_cross_encoder", return_value=mock_cross_encoder):
-        scores = retriever._score_chunks("query", chunks)
+        normalized, raw = retriever._score_chunks("query", chunks)
 
-    assert scores == pytest.approx([5.0, 5.0])
+    assert normalized == pytest.approx([5.0, 5.0])
+    assert raw == pytest.approx([-3.0, -3.0])
 
 
 def test_retriever_score_chunks_preserves_raw_ranking_order():
@@ -175,9 +178,9 @@ def test_retriever_score_chunks_preserves_raw_ranking_order():
         RetrievedChunk(content="middle", metadata={}, dense_score=0.1),
     ]
     with patch("src.retrieval.retriever._get_cross_encoder", return_value=mock_cross_encoder):
-        scores = retriever._score_chunks("query", chunks)
+        normalized, _raw = retriever._score_chunks("query", chunks)
 
-    scored = list(zip(chunks, scores, strict=True))
+    scored = list(zip(chunks, normalized, strict=True))
     ranked = [c.content for c, _ in sorted(scored, key=lambda pair: pair[1], reverse=True)]
     assert ranked == ["best", "middle", "worst"]
 
@@ -197,3 +200,79 @@ def test_retriever_retrieve_returns_empty_when_no_dense_hits():
     result = retriever.retrieve("empty query")
     assert result["chunks"] == []
     assert result["rerank_latency_s"] == 0.0
+
+
+def test_match_quality_strong_for_nonnegative_raw_score():
+    """A raw cross-encoder logit >= 0 is classified as a strong match."""
+    assert _match_quality(0.0) == "strong"
+    assert _match_quality(3.2) == "strong"
+
+
+def test_match_quality_moderate_for_raw_score_in_middle_band():
+    """A raw logit in [-5, 0) is classified as a moderate match."""
+    assert _match_quality(-0.01) == "moderate"
+    assert _match_quality(-5.0) == "moderate"
+    assert _match_quality(-2.5) == "moderate"
+
+
+def test_match_quality_weak_for_raw_score_below_negative_five():
+    """A raw logit < -5 is classified as a weak match.
+
+    Regression test: min-max normalization alone would show a chunk like
+    this at 99-100% relevance whenever it happens to be the best of a bad
+    batch (e.g. "Reynolds stress model" wiki pages surfacing for a laminar
+    pipe flow query) — match_quality is the absolute floor that catches
+    that case regardless of batch-relative rank.
+    """
+    assert _match_quality(-5.01) == "weak"
+    assert _match_quality(-10.0) == "weak"
+
+
+def test_match_quality_none_when_raw_score_unavailable():
+    """No raw score (cross-encoder fallback) means no quality band, not a guess."""
+    assert _match_quality(None) is None
+
+
+def test_retriever_rerank_sets_raw_score_and_match_quality_on_chunks():
+    """_rerank populates raw_rerank_score and match_quality alongside rerank_score."""
+    embedder = MagicMock()
+    vector_store = MagicMock()
+    retriever = CFDRetriever(embedder=embedder, vector_store=vector_store)
+
+    mock_cross_encoder = MagicMock()
+    # strong, moderate, weak, in that order
+    mock_cross_encoder.predict.return_value = [1.0, -2.0, -8.0]
+
+    chunks = [
+        RetrievedChunk(content="strong", metadata={}, dense_score=0.1),
+        RetrievedChunk(content="moderate", metadata={}, dense_score=0.1),
+        RetrievedChunk(content="weak", metadata={}, dense_score=0.1),
+    ]
+    with patch("src.retrieval.retriever._get_cross_encoder", return_value=mock_cross_encoder):
+        ranked, _elapsed = retriever._rerank("query", chunks, top_k=3)
+
+    by_content = {c.content: c for c in ranked}
+    assert by_content["strong"].raw_rerank_score == pytest.approx(1.0)
+    assert by_content["strong"].match_quality == "strong"
+    assert by_content["moderate"].raw_rerank_score == pytest.approx(-2.0)
+    assert by_content["moderate"].match_quality == "moderate"
+    assert by_content["weak"].raw_rerank_score == pytest.approx(-8.0)
+    assert by_content["weak"].match_quality == "weak"
+    # rerank_score (batch-relative) still spans the full 0-10 range
+    # regardless of the absolute quality band — that's the bug being fixed.
+    assert by_content["strong"].rerank_score == pytest.approx(10.0)
+
+
+def test_retriever_rerank_match_quality_none_on_cross_encoder_failure():
+    """match_quality is None (not a misleading guess) when the cross-encoder failed."""
+    embedder = MagicMock()
+    vector_store = MagicMock()
+    retriever = CFDRetriever(embedder=embedder, vector_store=vector_store)
+
+    with patch("src.retrieval.retriever._get_cross_encoder") as mock_get_ce:
+        mock_get_ce.side_effect = RuntimeError("model failed to load")
+        chunk = RetrievedChunk(content="some content", metadata={}, dense_score=0.8)
+        ranked, _elapsed = retriever._rerank("query", [chunk], top_k=1)
+
+    assert ranked[0].match_quality is None
+    assert ranked[0].raw_rerank_score is None

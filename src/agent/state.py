@@ -12,7 +12,10 @@ class AgentState(TypedDict):
         user_query: The original natural-language question from the user.
         flow_description: Parsed flow parameters (serialized FlowDescription).
         retrieved_chunks: RAG retrieval results, one dict per chunk with
-            content, metadata, dense_score, and rerank_score.
+            content, metadata, dense_score, rerank_score (batch-relative,
+            0-10), raw_rerank_score (the pre-normalization cross-encoder
+            logit, or None), and match_quality ("strong"/"moderate"/"weak"
+            absolute band derived from raw_rerank_score, or None).
         retrieval_quality: Self-graded retrieval quality score in [0, 1].
         reasoning_steps: A running trace of the agent's reasoning, one
             human-readable string per step, used for observability/UI.
@@ -20,7 +23,7 @@ class AgentState(TypedDict):
         validation_results: Serialized ValidationResult from physics_validator.
         final_response: The formatted final markdown answer for the user.
         citations: Source citations, one dict per cited chunk (title, source,
-            url, relevance score).
+            url, rerank_score, raw_rerank_score, match_quality).
         iteration_count: Total number of agent graph steps taken so far.
         retrieval_attempts: Number of retrieval attempts made so far.
         validation_retries: Number of regeneration retries after a failed

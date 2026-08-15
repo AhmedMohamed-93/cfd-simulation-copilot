@@ -263,9 +263,27 @@ def page_copilot() -> None:
             for c in citations:
                 score = c.get("rerank_score")
                 # rerank_score is 0-10 (min-max normalized within the
-                # retrieval batch); display as a 0-100% relevance figure.
+                # retrieval batch, so the top chunk always shows ~100% even
+                # when the whole batch is a poor match); display as a
+                # 0-100% relevance figure. match_quality is the absolute
+                # floor on top of that, derived from the raw
+                # (pre-normalization) cross-encoder logit — it's what lets
+                # a citation read "100% relevance (weak match)" instead of
+                # implying strong relevance just for ranking first.
+                # title alone (not source: title) — every ingested title
+                # already embeds its human-readable category, e.g.
+                # "OpenFOAM User Guide: Meshing Guidelines"; `source` is a
+                # separate internal slug, not a display name.
                 score_str = f" — relevance {score * 10:.0f}%" if score is not None else ""
-                st.markdown(f"- **{c.get('title', 'untitled')}** ({c.get('source', 'unknown')}){score_str}")
+                quality = c.get("match_quality")
+                quality_str = f" ({quality} match)" if quality else ""
+                st.markdown(f"- **{c.get('title', 'untitled')}**{score_str}{quality_str}")
+            if all(c.get("match_quality") == "weak" for c in citations):
+                st.warning(
+                    "Retrieval confidence was low for this query — the recommendation "
+                    "relies primarily on the physics decision rules rather than "
+                    "retrieved documentation."
+                )
 
     if result.get("explanation"):
         with st.expander("📝 Full agent explanation"):

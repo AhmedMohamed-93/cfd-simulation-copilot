@@ -10,7 +10,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      MISTRAL_API_KEY: test-key-not-real
+      LLM_PROVIDER: ollama
+      OLLAMA_MODEL: llama3.2:latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

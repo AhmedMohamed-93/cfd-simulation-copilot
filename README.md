@@ -144,7 +144,7 @@ Run via `python -m src.evaluation.ragas_eval --cases 5` (a subset of the 20 scen
 
 | Metric                          | Score   |
 |----------------------------------|---------|
-| Solver accuracy                  | 1.00    |
+| Solver accuracy                  | 0.80²   |
 | Turbulence model accuracy        | 1.00    |
 | File completeness                | 1.00    |
 | Physics validation pass rate     | 1.00    |
@@ -152,7 +152,11 @@ Run via `python -m src.evaluation.ragas_eval --cases 5` (a subset of the 20 scen
 | RAGAS answer relevancy           | N/A¹    |
 | RAGAS context precision          | N/A¹    |
 
+Turbulence model selection is governed by a deterministic physics decision layer that overrides LLM proposals failing physical consistency checks, so it is reproducible run-to-run regardless of LLM nondeterminism. Solver selection is deterministic except where the input query itself is physically ambiguous.
+
 ¹ Not computed in this run: `ragas==0.2.6`'s judge call is incompatible with the installed `langchain-ollama`/`ollama` client version (`AsyncClient.chat() got an unexpected keyword argument 'temperature'`), a dependency-version issue independent of the 4 metrics above (which score deterministically, without an LLM judge call). Full per-case results are in [`evaluation/results/ragas_results.json`](evaluation/results/ragas_results.json).
+
+² tc04 (lid-driven cavity) is the single miss: the query does not state whether the case is steady or transient, so the LLM's is_steady parse is genuinely ambiguous and varies run-to-run. This was left unforced deliberately — hardcoding is_steady=False for cavity geometries would produce wrong answers for the classic steady Ghia et al. benchmark. Turbulence model selection is fully deterministic and reproducible.
 
 ---
 

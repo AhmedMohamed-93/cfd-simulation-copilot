@@ -98,6 +98,8 @@ def node_retrieve_cfd_knowledge(state: AgentState) -> AgentState:
             "source": c["metadata"].get("source", "unknown"),
             "url": c["metadata"].get("url", ""),
             "rerank_score": c.get("rerank_score"),
+            "raw_rerank_score": c.get("raw_rerank_score"),
+            "match_quality": c.get("match_quality"),
         }
         for c in state["retrieved_chunks"]
     ]

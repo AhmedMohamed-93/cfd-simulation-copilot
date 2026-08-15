@@ -13,6 +13,7 @@ from src.agent.tools import (
     _field_hint,
     _response_instruction,
     _rule_based_solver_selection,
+    format_final_response,
     select_solver_and_models,
 )
 from src.generation.schemas import FlowDescription, SolverName, TurbulenceModel, ValidationResult
@@ -94,6 +95,20 @@ def test_rule_based_solver_selection_laminar_below_transition_re(laminar_pipe_fl
     config = _rule_based_solver_selection(laminar_pipe_flow)
     assert config.turbulence_model == TurbulenceModel.LAMINAR
     assert config.solver_name == SolverName.SIMPLE_FOAM
+
+
+def test_rule_based_solver_selection_justification_is_framed_as_physics_rules(laminar_pipe_flow):
+    """The justification reads as a deliberate physics decision, not a failure path.
+
+    Regression test: "Rule-based fallback: ..." undersold this as a
+    last-resort path when it's actually the deterministic invariant
+    enforcement layer the system is designed around.
+    """
+    config = _rule_based_solver_selection(laminar_pipe_flow)
+    assert config.justification.startswith("Selected via physics decision rules: ")
+    assert "Rule-based fallback" not in config.justification
+    assert "Re=" in config.justification
+    assert "-> simpleFoam." in config.justification
 
 
 def test_rule_based_solver_selection_turbulent_above_transition_re(turbulent_pipe_flow):
@@ -205,6 +220,78 @@ def test_rule_based_solver_selection_external_aero_turbulent_prefers_spalart_all
     assert config.turbulence_model == TurbulenceModel.SPALART_ALLMARAS
 
 
+def test_rule_based_solver_selection_transonic_airfoil_does_not_select_spalart_allmaras():
+    """A transonic/compressible airfoil does not get SpalartAllmaras from the fallback.
+
+    Regression test: evaluation suite case tc15 ("Transonic flow over a
+    supercritical airfoil at Mach 0.78... shock/boundary-layer interaction")
+    expects kOmegaSST — a blanket "any external aero -> SpalartAllmaras"
+    rule would get this wrong.
+    """
+    flow = FlowDescription(
+        reynolds_number=5000000,
+        mach_number=0.78,
+        geometry="Transonic flow over a supercritical airfoil",
+        fluid="air",
+        is_compressible=True,
+        is_steady=True,
+    )
+    config = _rule_based_solver_selection(flow)
+    assert config.turbulence_model == TurbulenceModel.K_OMEGA_SST
+
+
+def test_rule_based_solver_selection_turbine_blade_does_not_select_spalart_allmaras():
+    """A wind turbine blade does not get SpalartAllmaras from the fallback.
+
+    Regression test: evaluation suite case tc20 ("Turbulent external flow
+    over a wind turbine blade section") expects kOmegaSST — external
+    aerodynamics keyword matching alone is too broad for the SpalartAllmaras
+    preference; it must be scoped to airfoil/wing/NACA geometries.
+    """
+    flow = FlowDescription(
+        reynolds_number=1000000,
+        geometry="Turbulent external flow over a wind turbine blade section",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    config = _rule_based_solver_selection(flow)
+    assert config.turbulence_model == TurbulenceModel.K_OMEGA_SST
+
+
+def test_select_solver_and_models_overrides_turbulence_preference_for_low_speed_airfoil():
+    """select_solver_and_models corrects kOmegaSST to SpalartAllmaras for a low-speed airfoil.
+
+    Regression test for evaluation case tc05: the LLM's own solver pick
+    (simpleFoam) was correct, but its turbulence pick (kOmegaSST) merely
+    passed the coarse laminar/non-laminar check without matching the
+    case-type standard — this is what the turbulence_model_preference check
+    is for, distinct from reynolds_turbulence_consistency.
+    """
+    flow = FlowDescription(
+        reynolds_number=3000000,
+        geometry="External aerodynamics of a NACA0012 airfoil at low speed",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    fake_client = _FakeLLMClient(
+        {
+            "solver_name": "simpleFoam",
+            "turbulence_model": "kOmegaSST",
+            "is_compressible": False,
+            "is_steady": True,
+            "simulation_type": "RAS",
+            "justification": "(technically valid but non-standard, for testing)",
+        }
+    )
+    config = select_solver_and_models(flow, retrieved_chunks=[], client=fake_client)
+    assert config.solver_name == SolverName.SIMPLE_FOAM
+    assert config.turbulence_model == TurbulenceModel.SPALART_ALLMARAS
+    assert "corrected LLM proposal of 'kOmegaSST'" in config.justification
+    assert "turbulence_model_preference" in config.justification
+
+
 def test_select_solver_and_models_overrides_solver_only_preserves_turbulence_choice():
     """An LLM's valid turbulence pick survives a solver-only override.
 
@@ -233,6 +320,9 @@ def test_select_solver_and_models_overrides_solver_only_preserves_turbulence_cho
     config = select_solver_and_models(flow, retrieved_chunks=[], client=fake_client)
     assert config.solver_name == SolverName.SIMPLE_FOAM
     assert config.turbulence_model == TurbulenceModel.K_OMEGA_SST
+    assert config.justification.startswith("Selected via physics decision rules")
+    assert "corrected LLM proposal of 'rhoSimpleFoam'" in config.justification
+    assert "retained" in config.justification.lower()
 
 
 def test_select_solver_and_models_overrides_turbulence_only_preserves_solver_choice():
@@ -263,6 +353,9 @@ def test_select_solver_and_models_overrides_turbulence_only_preserves_solver_cho
     config = select_solver_and_models(flow, retrieved_chunks=[], client=fake_client)
     assert config.solver_name == SolverName.SIMPLE_FOAM
     assert config.turbulence_model == TurbulenceModel.LAMINAR
+    assert config.justification.startswith("Selected via physics decision rules")
+    assert "corrected LLM proposal of 'kOmegaSST'" in config.justification
+    assert "retained" in config.justification.lower()
 
 
 def test_select_solver_and_models_overrides_both_solver_and_turbulence():
@@ -287,6 +380,8 @@ def test_select_solver_and_models_overrides_both_solver_and_turbulence():
     config = select_solver_and_models(flow, retrieved_chunks=[], client=fake_client)
     assert config.solver_name == SolverName.SIMPLE_FOAM
     assert config.turbulence_model == TurbulenceModel.LAMINAR
+    assert config.justification.startswith("Selected via physics decision rules")
+    assert "corrected LLM proposal of 'buoyantPimpleFoam / kOmegaSST'" in config.justification
 
 
 def test_select_solver_and_models_does_not_override_turbulence_when_reynolds_unknown():
@@ -334,7 +429,11 @@ def test_select_solver_and_models_overrides_buoyant_solver_for_external_aero():
     fake_client = _FakeLLMClient(
         {
             "solver_name": "buoyantPimpleFoam",
-            "turbulence_model": "kOmegaSST",
+            # SpalartAllmaras (not kOmegaSST) so this test isolates the
+            # solver-only override path; a NACA0012 airfoil expects
+            # SpalartAllmaras (see turbulence_model_preference), which
+            # would otherwise also flag turbulence as bad here.
+            "turbulence_model": "SpalartAllmaras",
             "is_compressible": False,
             "is_steady": False,
             "simulation_type": "RAS",
@@ -343,7 +442,8 @@ def test_select_solver_and_models_overrides_buoyant_solver_for_external_aero():
     )
     config = select_solver_and_models(flow, retrieved_chunks=[], client=fake_client)
     assert config.solver_name == SolverName.SIMPLE_FOAM
-    assert "overridden" in config.justification.lower()
+    assert config.justification.startswith("Selected via physics decision rules")
+    assert "corrected LLM proposal of 'buoyantPimpleFoam'" in config.justification
     assert "simpleFoam" in config.justification
 
 
@@ -405,7 +505,11 @@ def test_select_solver_and_models_keeps_valid_llm_choice():
     fake_client = _FakeLLMClient(
         {
             "solver_name": "simpleFoam",
-            "turbulence_model": "kOmegaSST",
+            # SpalartAllmaras is the standard choice for a low-speed
+            # NACA0012 airfoil (see turbulence_model_preference) — this is
+            # what makes the whole answer "physically sound" and therefore
+            # not subject to override.
+            "turbulence_model": "SpalartAllmaras",
             "is_compressible": False,
             "is_steady": True,
             "simulation_type": "RAS",
@@ -415,6 +519,117 @@ def test_select_solver_and_models_keeps_valid_llm_choice():
     config = select_solver_and_models(flow, retrieved_chunks=[], client=fake_client)
     assert config.solver_name == SolverName.SIMPLE_FOAM
     assert config.justification == "Low-speed external aerodynamics."
+
+
+def test_format_final_response_citation_line_shows_title_relevance_and_quality(
+    laminar_pipe_flow, solver_config_laminar
+):
+    """A citation renders as 'title — relevance X% (quality match)'.
+
+    Every ingested title already embeds its human-readable category (e.g.
+    "OpenFOAM User Guide: Meshing Guidelines" — see document_loader.py);
+    `source` is a separate internal slug ("openfoam-user-guide-synthetic"),
+    not a display name, so it must not be prepended to the title.
+
+    Regression test for the reported UX bug: min-max normalization alone
+    let a "Reynolds stress model" wiki page show 99-100% relevance for a
+    laminar pipe flow query. match_quality is the absolute floor that
+    surfaces that mismatch to the reader instead of hiding it behind a
+    batch-relative percentage.
+    """
+    citations = [
+        {
+            "title": "OpenFOAM User Guide: Meshing Guidelines",
+            "source": "openfoam-user-guide-synthetic",
+            "url": "",
+            "rerank_score": 10.0,
+            "raw_rerank_score": 2.0,
+            "match_quality": "strong",
+        },
+        {
+            "title": "CFD-Online Wiki: Reynolds stress model",
+            "source": "cfd-online-wiki-synthetic",
+            "url": "",
+            "rerank_score": 9.9,
+            "raw_rerank_score": -7.0,
+            "match_quality": "weak",
+        },
+    ]
+    response = format_final_response(
+        laminar_pipe_flow,
+        solver_config_laminar,
+        generated_files={},
+        validation_result=ValidationResult(findings=[]),
+        citations=citations,
+    )
+    assert "OpenFOAM User Guide: Meshing Guidelines — relevance 100% (strong match)" in response
+    assert "CFD-Online Wiki: Reynolds stress model — relevance 99% (weak match)" in response
+    assert "openfoam-user-guide-synthetic" not in response
+
+
+def test_format_final_response_adds_low_confidence_note_when_all_citations_weak(
+    laminar_pipe_flow, solver_config_laminar
+):
+    """A note is appended when every citation is a weak match."""
+    citations = [
+        {
+            "title": "Reynolds stress model",
+            "source": "CFD-Online Wiki",
+            "url": "",
+            "rerank_score": 10.0,
+            "raw_rerank_score": -6.0,
+            "match_quality": "weak",
+        },
+        {
+            "title": "Large Eddy Simulation",
+            "source": "CFD-Online Wiki",
+            "url": "",
+            "rerank_score": 8.0,
+            "raw_rerank_score": -9.0,
+            "match_quality": "weak",
+        },
+    ]
+    response = format_final_response(
+        laminar_pipe_flow,
+        solver_config_laminar,
+        generated_files={},
+        validation_result=ValidationResult(findings=[]),
+        citations=citations,
+    )
+    assert "retrieval confidence was low for this query" in response
+    assert "physics decision rules rather than retrieved documentation" in response
+
+
+def test_format_final_response_omits_low_confidence_note_when_not_all_weak(
+    laminar_pipe_flow, solver_config_laminar
+):
+    """No low-confidence note when at least one citation is a good match."""
+    citations = [
+        {
+            "title": "Meshing Guidelines",
+            "source": "OpenFOAM User Guide",
+            "url": "",
+            "rerank_score": 10.0,
+            "raw_rerank_score": 2.0,
+            "match_quality": "strong",
+        },
+        {
+            "title": "Reynolds stress model",
+            "source": "CFD-Online Wiki",
+            "url": "",
+            "rerank_score": 3.0,
+            "raw_rerank_score": -9.0,
+            "match_quality": "weak",
+        },
+    ]
+    response = format_final_response(
+        laminar_pipe_flow,
+        solver_config_laminar,
+        generated_files={},
+        validation_result=ValidationResult(findings=[]),
+        citations=citations,
+    )
+    assert "retrieval confidence was low" not in response
 
 
 def test_route_after_retrieval_retries_on_low_quality():

@@ -9,7 +9,9 @@ from src.generation.openfoam_generator import (
 from src.generation.physics_validator import (
     _check_reynolds_turbulence_consistency,
     _check_solver_algorithm_consistency,
+    _check_turbulence_model_preference,
     _laminar_to_turbulent_threshold,
+    _prefers_spalart_allmaras,
     is_external_aerodynamics_geometry,
     validate_physics,
 )
@@ -488,4 +490,162 @@ def test_validate_physics_allows_icofoam_solver_for_cavity_case():
     result = validate_physics(flow, config, files)
 
     finding = next(f for f in result.findings if f.rule == "solver_domain_consistency")
+    assert finding.severity == ValidationSeverity.PASS
+
+
+def test_prefers_spalart_allmaras_true_for_low_speed_airfoil():
+    """A low-speed, incompressible NACA0012 airfoil prefers SpalartAllmaras."""
+    flow = FlowDescription(
+        reynolds_number=3000000,
+        geometry="External aerodynamics of a NACA0012 airfoil",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    assert _prefers_spalart_allmaras(flow) is True
+
+
+def test_prefers_spalart_allmaras_false_for_transonic_airfoil():
+    """A transonic/compressible airfoil does not prefer SpalartAllmaras.
+
+    Regression test: evaluation suite case tc15 ("Transonic flow over a
+    supercritical airfoil at Mach 0.78... shock/boundary-layer interaction")
+    expects kOmegaSST, not SpalartAllmaras — a blanket "any airfoil ->
+    SpalartAllmaras" rule would get this wrong.
+    """
+    flow = FlowDescription(
+        reynolds_number=5000000,
+        mach_number=0.78,
+        geometry="Transonic flow over a supercritical airfoil",
+        fluid="air",
+        is_compressible=True,
+        is_steady=True,
+    )
+    assert _prefers_spalart_allmaras(flow) is False
+
+
+def test_prefers_spalart_allmaras_false_for_turbine_blade():
+    """A turbine blade (external aero, but not airfoil/wing/NACA) does not prefer SpalartAllmaras.
+
+    Regression test: evaluation suite case tc20 ("Turbulent external flow
+    over a wind turbine blade section") expects kOmegaSST, not
+    SpalartAllmaras — external-aerodynamics keyword matching alone
+    (is_external_aerodynamics_geometry) is too broad for this preference;
+    it must be scoped to airfoil/wing/NACA specifically.
+    """
+    flow = FlowDescription(
+        reynolds_number=1000000,
+        geometry="Turbulent external flow over a wind turbine blade section",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    assert is_external_aerodynamics_geometry(flow.geometry) is True
+    assert _prefers_spalart_allmaras(flow) is False
+
+
+def test_check_turbulence_model_preference_flags_komega_for_low_speed_airfoil():
+    """kOmegaSST for a low-speed NACA0012 airfoil is flagged in favor of SpalartAllmaras."""
+    flow = FlowDescription(
+        reynolds_number=3000000,
+        geometry="External aerodynamics of a NACA0012 airfoil",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    config = SolverConfiguration(
+        solver_name=SolverName.SIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.K_OMEGA_SST,
+        is_compressible=False,
+        is_steady=True,
+        simulation_type=SimulationType.RAS,
+        justification="(deliberately non-standard, for testing)",
+    )
+    finding = _check_turbulence_model_preference(flow, config)
+    assert finding.severity == ValidationSeverity.ERROR
+    assert finding.rule == "turbulence_model_preference"
+
+
+def test_check_turbulence_model_preference_passes_spalart_for_low_speed_airfoil():
+    """SpalartAllmaras for the same low-speed airfoil case passes cleanly."""
+    flow = FlowDescription(
+        reynolds_number=3000000,
+        geometry="External aerodynamics of a NACA0012 airfoil",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    config = SolverConfiguration(
+        solver_name=SolverName.SIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.SPALART_ALLMARAS,
+        is_compressible=False,
+        is_steady=True,
+        simulation_type=SimulationType.RAS,
+        justification="Standard choice for attached-flow external aerodynamics.",
+    )
+    finding = _check_turbulence_model_preference(flow, config)
+    assert finding.severity == ValidationSeverity.PASS
+
+
+def test_check_turbulence_model_preference_passes_komega_for_transonic_airfoil():
+    """kOmegaSST for a transonic airfoil passes — SpalartAllmaras is not required there."""
+    flow = FlowDescription(
+        reynolds_number=5000000,
+        mach_number=0.78,
+        geometry="Transonic flow over a supercritical airfoil",
+        fluid="air",
+        is_compressible=True,
+        is_steady=True,
+    )
+    config = SolverConfiguration(
+        solver_name=SolverName.RHO_SIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.K_OMEGA_SST,
+        is_compressible=True,
+        is_steady=True,
+        simulation_type=SimulationType.RAS,
+        justification="Transonic shock/boundary-layer interaction.",
+    )
+    finding = _check_turbulence_model_preference(flow, config)
+    assert finding.severity == ValidationSeverity.PASS
+
+
+def test_check_turbulence_model_preference_passes_komega_for_turbine_blade():
+    """kOmegaSST for a turbine blade passes — SpalartAllmaras is not required there."""
+    flow = FlowDescription(
+        reynolds_number=1000000,
+        geometry="Turbulent external flow over a wind turbine blade section",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    config = SolverConfiguration(
+        solver_name=SolverName.SIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.K_OMEGA_SST,
+        is_compressible=False,
+        is_steady=True,
+        simulation_type=SimulationType.RAS,
+        justification="Separation-prone rotating machinery flow.",
+    )
+    finding = _check_turbulence_model_preference(flow, config)
+    assert finding.severity == ValidationSeverity.PASS
+
+
+def test_check_turbulence_model_preference_not_applicable_in_laminar_regime():
+    """The preference check does not apply below the laminar/turbulent threshold."""
+    flow = FlowDescription(
+        reynolds_number=1000,
+        geometry="External aerodynamics of a NACA0012 airfoil",
+        fluid="air",
+        is_compressible=False,
+        is_steady=True,
+    )
+    config = SolverConfiguration(
+        solver_name=SolverName.SIMPLE_FOAM,
+        turbulence_model=TurbulenceModel.LAMINAR,
+        is_compressible=False,
+        is_steady=True,
+        simulation_type=SimulationType.LAMINAR,
+        justification="Laminar regime.",
+    )
+    finding = _check_turbulence_model_preference(flow, config)
     assert finding.severity == ValidationSeverity.PASS

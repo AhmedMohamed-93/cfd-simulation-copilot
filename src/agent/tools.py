@@ -21,7 +21,9 @@ from src.generation.physics_validator import (
     _check_reynolds_turbulence_consistency,
     _check_solver_algorithm_consistency,
     _check_solver_domain_consistency,
+    _check_turbulence_model_preference,
     _laminar_to_turbulent_threshold,
+    _prefers_spalart_allmaras,
     is_external_aerodynamics_geometry,
 )
 from src.generation.physics_validator import validate_physics as _validate_physics
@@ -34,6 +36,14 @@ from src.generation.schemas import (
 from src.retrieval.retriever import CFDRetriever
 
 logger = logging.getLogger(__name__)
+
+# Label for justifications produced by the deterministic decision tree in
+# _rule_based_solver_selection — used both when the LLM fails outright and
+# when it succeeds but a sanity check overrides part of its answer. Framed
+# as a deliberate physics-based decision layer, not a failure path: this
+# check is the actual invariant enforcement the system is designed around,
+# not a fallback of last resort.
+_PHYSICS_RULES_LABEL = "Selected via physics decision rules"
 
 _RETRIEVAL_ASPECTS = (
     "solver selection",
@@ -218,6 +228,8 @@ def retrieve_cfd_knowledge(
                 "metadata": c.metadata,
                 "dense_score": c.dense_score,
                 "rerank_score": c.rerank_score,
+                "raw_rerank_score": c.raw_rerank_score,
+                "match_quality": c.match_quality,
             }
             for c in chunks
         ],
@@ -278,23 +290,33 @@ def select_solver_and_models(
 
         domain_check = _check_solver_domain_consistency(flow_description, config)
         algorithm_check = _check_solver_algorithm_consistency(config)
-        turbulence_check = _check_reynolds_turbulence_consistency(flow_description, config)
+        reynolds_turbulence_check = _check_reynolds_turbulence_consistency(flow_description, config)
+        turbulence_preference_check = _check_turbulence_model_preference(flow_description, config)
 
         solver_bad = ValidationSeverity.ERROR in (domain_check.severity, algorithm_check.severity)
-        # A missing Reynolds number also reports non-PASS ("cannot verify"),
-        # but that's not evidence the LLM's choice is wrong — only override
-        # when Re is known and genuinely inconsistent with the model chosen.
-        turbulence_bad = (
+        # A missing Reynolds number also reports non-PASS ("cannot verify")
+        # from reynolds_turbulence_check, but that's not evidence the LLM's
+        # choice is wrong — only treat it as bad when Re is known and
+        # genuinely inconsistent. turbulence_preference_check is narrower
+        # and ERROR-only (e.g. kOmegaSST chosen where SpalartAllmaras is the
+        # case-type standard), so no such guard is needed there.
+        reynolds_turbulence_bad = (
             flow_description.reynolds_number is not None
-            and turbulence_check.severity != ValidationSeverity.PASS
+            and reynolds_turbulence_check.severity != ValidationSeverity.PASS
         )
+        turbulence_preference_bad = turbulence_preference_check.severity == ValidationSeverity.ERROR
+        turbulence_bad = reynolds_turbulence_bad or turbulence_preference_bad
 
         if not solver_bad and not turbulence_bad:
             return config
 
         fallback = _rule_based_solver_selection(flow_description)
+        # Whichever turbulence check actually fired — reynolds_turbulence
+        # takes precedence since a laminar/non-laminar mismatch is a more
+        # fundamental error than a case-type preference violation.
+        turbulence_bad_check = reynolds_turbulence_check if reynolds_turbulence_bad else turbulence_preference_check
         bad_rule = domain_check.rule if domain_check.severity == ValidationSeverity.ERROR else (
-            algorithm_check.rule if algorithm_check.severity == ValidationSeverity.ERROR else turbulence_check.rule
+            algorithm_check.rule if algorithm_check.severity == ValidationSeverity.ERROR else turbulence_bad_check.rule
         )
         logger.warning(
             "select_solver_and_models: LLM chose solver=%s turbulence=%s for geometry %r, "
@@ -308,26 +330,40 @@ def select_solver_and_models(
             turbulence_bad,
         )
 
+        # fallback.justification is always "{_PHYSICS_RULES_LABEL}: {reasoning}"
+        # (see _rule_based_solver_selection) — reuse that same reasoning body
+        # so the "corrected LLM proposal" variants below stay in sync with
+        # the plain fallback wording without duplicating the format string.
+        reasoning = fallback.justification.removeprefix(f"{_PHYSICS_RULES_LABEL}: ")
+
         if solver_bad and turbulence_bad:
             # Neither half of the LLM's answer can be trusted — replace the
-            # whole configuration.
-            return fallback
+            # whole configuration, framed as a correction of what the LLM
+            # actually proposed rather than a generic fallback.
+            return fallback.model_copy(
+                update={
+                    "justification": (
+                        f"{_PHYSICS_RULES_LABEL} (corrected LLM proposal of "
+                        f"'{config.solver_name.value} / {config.turbulence_model.value}'): {reasoning}"
+                    ),
+                }
+            )
         if solver_bad:
             # Only the solver family/algorithm was wrong; the LLM's
             # turbulence model passed its own sanity check, so keep it
-            # rather than discarding a correct answer along with a wrong
-            # one. The justification is composed (not just fallback.justification
-            # copied wholesale) so it doesn't describe a solver that was
-            # never actually adopted.
+            # rather than discarding a correct answer along with a wrong one.
             return config.model_copy(
                 update={
                     "solver_name": fallback.solver_name,
                     "is_compressible": fallback.is_compressible,
                     "is_steady": fallback.is_steady,
                     "justification": (
-                        f"{config.justification} [Solver overridden: '{bad_rule}' flagged "
-                        f"the original choice ({config.solver_name.value}) — corrected to "
-                        f"{fallback.solver_name.value} via rule-based fallback.]"
+                        f"{_PHYSICS_RULES_LABEL} (corrected LLM proposal of "
+                        f"'{config.solver_name.value}'): the '{bad_rule}' rule requires "
+                        f"'{fallback.solver_name.value}' for this geometry/speed regime "
+                        f"({reasoning}). Turbulence model '{config.turbulence_model.value}' "
+                        "from the original proposal is retained — it passed its own "
+                        "consistency check."
                     ),
                 }
             )
@@ -337,10 +373,11 @@ def select_solver_and_models(
                 "turbulence_model": fallback.turbulence_model,
                 "simulation_type": fallback.simulation_type,
                 "justification": (
-                    f"{config.justification} [Turbulence model overridden: "
-                    f"'{turbulence_check.rule}' flagged the original choice "
-                    f"({config.turbulence_model.value}) — corrected to "
-                    f"{fallback.turbulence_model.value} via rule-based fallback.]"
+                    f"{_PHYSICS_RULES_LABEL} (corrected LLM proposal of "
+                    f"'{config.turbulence_model.value}'): the '{turbulence_bad_check.rule}' rule "
+                    f"requires '{fallback.turbulence_model.value}' for this case "
+                    f"({reasoning}). Solver '{config.solver_name.value}' from the original "
+                    "proposal is retained — it passed its own consistency check."
                 ),
             }
         )
@@ -405,11 +442,14 @@ def _rule_based_solver_selection(flow: FlowDescription) -> SolverConfiguration:
     if is_laminar_regime:
         turbulence = TurbulenceModel.LAMINAR
         sim_type = SimulationType.LAMINAR
-    elif is_external_aero:
-        # SpalartAllmaras is the standard, economical one-equation model
-        # for attached external aerodynamic boundary layers (airfoils,
-        # wings) — the industry-default choice for exactly this case type,
-        # not merely "also acceptable" alongside kOmegaSST.
+    elif _prefers_spalart_allmaras(flow):
+        # SpalartAllmaras is the standard, economical one-equation model for
+        # attached external aerodynamic boundary layers (low-speed
+        # airfoils/wings) — the industry-default choice for exactly this
+        # case type. Deliberately narrower than "any external aero": a
+        # bluffer geometry (turbine blade, building) or a high-speed/
+        # transonic case still wants kOmegaSST — see
+        # _prefers_spalart_allmaras.
         turbulence = TurbulenceModel.SPALART_ALLMARAS
         sim_type = SimulationType.RAS
     else:
@@ -423,7 +463,7 @@ def _rule_based_solver_selection(flow: FlowDescription) -> SolverConfiguration:
         is_steady=flow.is_steady,
         simulation_type=sim_type,
         justification=(
-            f"Rule-based fallback: Re={re_number:g} -> {turbulence.value}; "
+            f"{_PHYSICS_RULES_LABEL}: Re={re_number:g} -> {turbulence.value}; "
             f"steady={flow.is_steady}, compressible={flow.is_compressible}, "
             f"multiphase={flow.multiphase}, external_aerodynamics={is_external_aero}, "
             f"buoyant={flow.temperature_dependent and not is_external_aero} -> {solver.value}."
@@ -513,13 +553,31 @@ def format_final_response(
         lines.append("\n## Citations\n")
         for c in citations:
             # rerank_score is 0-10 (min-max normalized within the retrieval
-            # batch); display as a 0-100% relevance figure.
+            # batch, so the top chunk always shows ~100% even when the
+            # whole batch is a poor match); display as a 0-100% relevance
+            # figure. match_quality is the absolute floor on top of that —
+            # derived from the raw (pre-normalization) cross-encoder logit,
+            # it's what lets a citation read "100% relevance (weak match)"
+            # instead of implying strong relevance just for ranking first.
+            # title alone (not source: title) — every ingested title already
+            # embeds its human-readable category, e.g. "OpenFOAM User Guide:
+            # Meshing Guidelines"; `source` is a separate internal slug
+            # (e.g. "openfoam-user-guide-synthetic"), not a display name.
             relevance = (
                 f" — relevance {c['rerank_score'] * 10:.0f}%"
                 if c.get("rerank_score") is not None
                 else ""
             )
-            lines.append(f"- {c.get('title', 'untitled')} ({c.get('source', 'unknown')}){relevance}")
+            quality = c.get("match_quality")
+            quality_suffix = f" ({quality} match)" if quality else ""
+            lines.append(f"- {c.get('title', 'untitled')}{relevance}{quality_suffix}")
+
+        if all(c.get("match_quality") == "weak" for c in citations):
+            lines.append(
+                "\n**Note:** retrieval confidence was low for this query — the "
+                "recommendation relies primarily on the physics decision rules "
+                "rather than retrieved documentation.\n"
+            )
 
     lines.append("\n## Recommendations\n")
     lines.append(
