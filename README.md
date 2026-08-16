@@ -16,8 +16,6 @@ CFD Simulation Copilot is a production-grade AI agent that integrates LLMs with 
 
 > **Designed to be LLM-agnostic.** Every LLM call goes through a single provider-pluggable client ([`src/common/llm_client.py`](src/common/llm_client.py)) supporting three backends: Hugging Face (default, free, no local RAM), a fully local Ollama server (free but RAM-hungry, see [Production deployment](#production-deployment)), and the **Mistral API** (`mistral-large-latest`) for production. Switching is one setting; the agent graph, tools, and prompts are unchanged. This project doubles as a direct demonstration of building a production agentic + RAG system on Mistral's own models, without requiring a paid key just to try it out.
 
-🔗 Live demo coming soon: deploying to Hugging Face Spaces
-
 **Source:** [github.com/AhmedMohamed-93/cfd-simulation-copilot](https://github.com/AhmedMohamed-93/cfd-simulation-copilot)
 
 ---
